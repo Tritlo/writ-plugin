@@ -19,7 +19,7 @@ data Label = L
            | H 
            deriving (Show)
 
-type instance DefaultTo Label = H
+type instance DefaultTo Label = L
 
 data F (a :: Label) = F deriving (Show)
 
@@ -27,7 +27,7 @@ class Less (l :: Label) (l' :: Label) where
 instance Less L H where
 instance Less l l where
 
-f :: (Less a H) => F a -> F H
+f :: Less H a => F a -> F H
 f F = F
 
 main :: IO ()
