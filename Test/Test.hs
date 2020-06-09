@@ -6,20 +6,19 @@
 {-# LANGUAGE MultiParamTypeClasses #-}
 {-# LANGUAGE FlexibleContexts #-}
 {-# LANGUAGE TypeFamilies #-}
-{-# LANGUAGE AllowAmbiguousTypes #-}
+--{-# LANGUAGE AllowAmbiguousTypes #-}
 {-# LANGUAGE TemplateHaskell #-}
 --Test
 {-# LANGUAGE TypeApplications #-}
 module Main where
 
-import KindDefaults (DefaultTo)
-
+import KindDefaults (Default)
 
 data Label = L
            | H 
            deriving (Show)
 
-type instance DefaultTo Label = L
+type instance Default Label = L
 
 data F (a :: Label) = F deriving (Show)
 

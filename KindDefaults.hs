@@ -2,4 +2,4 @@
 {-# LANGUAGE PolyKinds #-}
 module KindDefaults where
 
-type family DefaultTo k :: k
+type family Default k :: k

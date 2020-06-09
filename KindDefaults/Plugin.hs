@@ -1,6 +1,6 @@
 -- Copyright (c) 2020 Matthias Pall Gissurarson
 {-# LANGUAGE DataKinds #-}
-module KindDefaults.Plugin  (plugin) where
+module KindDefaults.Plugin where
 
 import GhcPlugins hiding (TcPlugin)
 import TcRnTypes
@@ -78,8 +78,7 @@ defaultingCt defaultTyCon (var, kind, def, loc) =
    do ev <- getEv
       return $ CTyEqCan {cc_ev = ev, cc_tyvar = var,
                          cc_rhs = eqTo, cc_eq_rel=eqRel }
- where --eqTo = var -- if we want direct
-       eqTo = mkTyConApp defaultTyCon [kind]
+ where eqTo = mkTyConApp defaultTyCon [kind]
        predTy = mkTyConApp eqPrimTyCon [kind, kind, mkTyVarTy var, eqTo]
        eqRel = NomEq
        getEv = do ref <- tcPluginIO $ newIORef Nothing
@@ -95,9 +94,9 @@ getDefaultTyCon =
       fpmRes <- tcPluginIO $ findPluginModule env (mkModuleName "KindDefaults") 
       case fpmRes of
          Found _ mod  ->
-            do name <- lookupOrig mod (mkTcOcc "DefaultTo")
+            do name <- lookupOrig mod (mkTcOcc "Default")
                tcLookupTyCon name
-         _ -> pprPanic "DefaultTo not found!" empty
+         _ -> pprPanic "Default not found!" empty
 
 getTyVarDefaults :: FamInstEnvs -> TyCon -> Ct -> [(TyCoVar, Kind, Type, CtLoc)]
 getTyVarDefaults famInsts defaultToTyCon ct = mapMaybe getDefault tvs
