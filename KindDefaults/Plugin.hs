@@ -5,41 +5,25 @@ module KindDefaults.Plugin  (plugin) where
 import GhcPlugins hiding (TcPlugin)
 import TcRnTypes
 import TcPluginM
-import Control.Monad (when, join)
-import Constraint
-import Data.Maybe (fromJust, isJust, mapMaybe)
-import Data.IORef
+import Constraint 
+import ErrUtils (Severity(SevWarning))
+
+import Control.Monad (when)
+import Data.Maybe (mapMaybe)
+import Data.IORef (newIORef, modifyIORef, readIORef)
 import Data.List (nub, sort)
 import Data.Function (on)
-import PrelNames
-import TcEvidence (EvTerm, evCoercion)
-import ErrUtils
-import Data.Data (Data)
 
-import FamInst 
-import FamInstEnv
-import Finder 
+
+import FamInstEnv (FamInstMatch(..), FamInst(..), lookupFamInstEnv, FamInstEnvs)
+import Finder (findPluginModule)
 
 import TysPrim (eqPrimTyCon)
-import Predicate
-
-
-import GHC.Hs
-
-
--- We have to add an import of GHC.TypeLits() to the module, otherwise we
--- can get funny messages about interface files being missing
-addTypeLitImport :: HsParsedModule -> HsParsedModule
-addTypeLitImport pm@HsParsedModule{hpm_module=L l m@HsModule{hsmodImports = imps}}
-   = pm{hpm_module = L l m{hsmodImports = imp:imps}}
-  where imp = noLoc (simpleImportDecl (moduleName gHC_TYPELITS)) {ideclHiding = Just (False, noLoc [])}
-
+import Predicate (EqRel(NomEq))
 
 plugin :: Plugin
 plugin = defaultPlugin { tcPlugin = Just . kindDefaultPlugin
-                       , parsedResultAction = \_ _ -> return . addTypeLitImport
                        , pluginRecompile = purePlugin }
-
 
 data Log = Defaulting TyCoVar Kind Type SrcSpan
 
@@ -54,17 +38,14 @@ instance Eq Log where
 
 addWarning :: DynFlags -> Log -> IO()
 addWarning dflags log = warn (logMsg log)
-  where
-    warn =
-      putLogMsg dflags NoReason SevWarning (logSrc log) (defaultErrStyle dflags)
+  where warn = putLogMsg dflags NoReason SevWarning (logSrc log) (defaultErrStyle dflags)
 
 logDefaulting :: DynFlags -> (TyCoVar, Kind, Type, CtLoc) -> Log
 logDefaulting _ (var, kind, ty, loc) = Defaulting var kind ty (RealSrcSpan $ ctLocSpan loc)
 
 logMsg :: Log -> SDoc
 logMsg (Defaulting var kind ty _) = text "Defaulting" <+> ppr (occName var) <+>
-                                    dcolon <+> ppr kind <+>
-                                    text "to" <+> ppr ty
+                                    dcolon <+> ppr kind <+> text "to" <+> ppr ty
 
 kindDefaultPlugin :: [CommandLineOption] -> TcPlugin
 kindDefaultPlugin opts = TcPlugin initialize solve stop
@@ -80,13 +61,10 @@ kindDefaultPlugin opts = TcPlugin initialize solve stop
         ; mapM_ (pprDebug "Given:") given
         ; mapM_ (pprDebug "Derived:") derived
         ; mapM_ (pprDebug "Wanted:") wanted
-        ; instEnvs <- unsafeTcPluginTcM tcGetFamInstEnvs
+        ; instEnvs <- getFamInstEnvs
         ; defaultToTyCon <- getDefaultTyCon
         ; let tvs = map (getTyVarDefaults instEnvs defaultToTyCon) wanted
         ; tcPluginIO $ modifyIORef warns (concatMap ( map (logDefaulting dflags)) tvs ++)
-        ; mapM_ (pprDebug "TyVars:" . (map (\(a,b,c,_) -> (a,b,c)))) tvs
-        ; let defs =  map (map (defaultEqConstraint defaultToTyCon)) tvs
-        ; mapM_ (pprDebug "Defs:" ) defs
         ; defCts <- concat <$> mapM (mapM (defaultingCt defaultToTyCon)) tvs
         ; mapM_ (pprDebug "Defs:" ) defCts
         ; return $ TcPluginOk [] defCts }
@@ -94,12 +72,6 @@ kindDefaultPlugin opts = TcPlugin initialize solve stop
         do { dflags <- unsafeTcPluginTcM getDynFlags
            ; tcPluginIO $ readIORef warns >>=
                           mapM_ (addWarning dflags) . sort . nub }
-
-defaultEqConstraint :: TyCon -> (TyCoVar, Kind, Type, CtLoc) -> Type
-defaultEqConstraint defaultTyCon (var, kind, def, _) = 
-      mkTyConApp eqPrimTyCon [kind, kind, mkTyVarTy var, eqTo]
- where --eqTo = var -- if we want direct
-       eqTo = mkTyConApp defaultTyCon [kind]
 
 defaultingCt :: TyCon -> (TyCoVar, Kind, Type, CtLoc) -> TcPluginM Ct
 defaultingCt defaultTyCon (var, kind, def, loc) = 
@@ -136,11 +108,3 @@ getTyVarDefaults famInsts defaultToTyCon ct = mapMaybe getDefault tvs
               [FamInstMatch {fim_instance=FamInst{fi_rhs=def}}] ->
                  Just (ty, varType ty, def, ctLoc ct)
               _ -> Nothing
-
-isPrimEqTyCon :: TyCon -> Bool
-isPrimEqTyCon tyCon = getUnique tyCon == eqPrimTyConKey
-
-isTYPE :: Type -> Bool
-isTYPE ty = case splitTyConApp_maybe ty of
-            Just (t, _) ->  getUnique t == tYPETyConKey
-            _ -> False
