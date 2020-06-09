@@ -1,5 +1,4 @@
 -- Copyright (c) 2020 Matthias Pall Gissurarson
-{-# LANGUAGE TemplateHaskell #-}
 {-# LANGUAGE DataKinds #-}
 module KindDefaults.Plugin  (plugin) where
 
@@ -19,15 +18,19 @@ import Data.Data (Data)
 
 import FamInst 
 import FamInstEnv
-import Finder
+import Finder 
 
-import GHC.Hs 
+import TysPrim (eqPrimTyCon)
+
+
+import GHC.Hs
+
 
 -- We have to add an import of GHC.TypeLits() to the module, otherwise we
 -- can get funny messages about interface files being missing
 addTypeLitImport :: HsParsedModule -> HsParsedModule
 addTypeLitImport pm@HsParsedModule{hpm_module=L l m@HsModule{hsmodImports = imps}}
-   = pm{hpm_module = L l m{hsmodImports = (imp:imps)}}
+   = pm{hpm_module = L l m{hsmodImports = imp:imps}}
   where imp = noLoc (simpleImportDecl (moduleName gHC_TYPELITS)) {ideclHiding = Just (False, noLoc [])}
 
 
@@ -36,34 +39,31 @@ plugin = defaultPlugin { tcPlugin = Just . kindDefaultPlugin
                        , parsedResultAction = \_ _ -> return . addTypeLitImport
                        , pluginRecompile = purePlugin }
 
-getMsgType :: String -> TcPluginM Type
-getMsgType str = do {
-     typeErrorCon <- tcLookupTyCon errorMessageTypeErrorFamName
-   ; textCon <- promoteDataCon <$> tcLookupDataCon typeErrorTextDataConName
-   ; return $ mkTyConApp typeErrorCon [constraint, mkTyConApp textCon [msg]]}
- where msg :: Type
-       msg = mkStrLitTy $ fsLit str
-       constraint = mkTyConApp constraintKindTyCon []
 
-
-data Log = ForbiddenFlow SrcSpan
-         | Promotion SrcSpan ((String, String), String) deriving (Eq, Show)
+data Log = Defaulting TyCoVar Kind Type SrcSpan
 
 logSrc :: Log -> SrcSpan
-logSrc (ForbiddenFlow l) = l
-logSrc (Promotion l _) = l
+logSrc (Defaulting _ _ _ l) = l
 
 instance Ord Log where
   compare = compare `on` logSrc
 
+instance Eq Log where
+   (==) = (==) `on` logSrc
+
 addWarning :: DynFlags -> Log -> IO()
-addWarning dflags log = warn msg
+addWarning dflags log = warn (logMsg log)
   where
     warn =
       putLogMsg dflags NoReason SevWarning (logSrc log) (defaultErrStyle dflags)
-    msg = text "Defaulting!"
 
+logDefaulting :: DynFlags -> (TyCoVar, Kind, Type, SrcSpan) -> Log
+logDefaulting _ (var, kind, ty, loc) = Defaulting var kind ty loc
 
+logMsg :: Log -> SDoc
+logMsg (Defaulting var kind ty _) = text "Defaulting" <+> ppr (occName var) <+>
+                                    dcolon <+> ppr kind <+>
+                                    text "to" <+> ppr ty
 
 kindDefaultPlugin :: [CommandLineOption] -> TcPlugin
 kindDefaultPlugin opts = TcPlugin initialize solve stop
@@ -82,12 +82,21 @@ kindDefaultPlugin opts = TcPlugin initialize solve stop
         ; instEnvs <- unsafeTcPluginTcM tcGetFamInstEnvs
         ; defaultToTyCon <- getDefaultTyCon
         ; let tvs = map (getTyVarDefaults instEnvs defaultToTyCon) wanted
+        ; tcPluginIO $ modifyIORef warns (concatMap ( map (logDefaulting dflags)) tvs ++)
         ; mapM_ (pprDebug "TyVars:" ) tvs
+        ; let defs =  map (map (defaultEqConstraint defaultToTyCon)) tvs
+        ; mapM_ (pprDebug "Defs:" ) defs
         ; return $ TcPluginOk [] [] }
      stop warns =
         do { dflags <- unsafeTcPluginTcM getDynFlags
            ; tcPluginIO $ readIORef warns >>=
                           mapM_ (addWarning dflags) . sort . nub }
+
+defaultEqConstraint :: TyCon -> (TyCoVar, Kind, Type, SrcSpan) -> Type
+defaultEqConstraint defaultTyCon (ty, kind, var, _) = 
+      mkTyConApp eqPrimTyCon [kind, kind, mkTyVarTy ty, eqTo]
+ where --eqTo = var -- if we want direct
+       eqTo = mkTyConApp defaultTyCon [kind]
 
 getDefaultTyCon :: TcPluginM TyCon
 getDefaultTyCon =
@@ -99,14 +108,14 @@ getDefaultTyCon =
                tcLookupTyCon name
          _ -> pprPanic "DefaultTo not found!" empty
 
-getTyVarDefaults :: FamInstEnvs -> TyCon -> Ct -> [(TyCoVar,Type)]
+getTyVarDefaults :: FamInstEnvs -> TyCon -> Ct -> [(TyCoVar, Kind, Type, SrcSpan)]
 getTyVarDefaults famInsts defaultToTyCon ct = mapMaybe getDefault tvs
   where tvs = tyCoVarsOfCtList ct 
         lookup kind = lookupFamInstEnv famInsts defaultToTyCon [kind]
         getDefault ty =
-           case lookup (varType ty) of
+           case lookup  (varType ty) of
               [FamInstMatch {fim_instance=FamInst{fi_rhs=def}}] ->
-                 Just (ty, def)
+                 Just (ty, varType ty, def, RealSrcSpan $ ctLocSpan $ ctLoc ct)
               _ -> Nothing
 
 isPrimEqTyCon :: TyCon -> Bool

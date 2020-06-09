@@ -5,7 +5,7 @@ version: 1.0.0
 
 executable test
   default-language: Haskell2010
-  build-depends: base, KindDefaults, data-default
+  build-depends: base, KindDefaults
   main-is: Test.hs
   ghc-options: -Wall
 
