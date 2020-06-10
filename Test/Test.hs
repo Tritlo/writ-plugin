@@ -6,29 +6,44 @@
 {-# LANGUAGE MultiParamTypeClasses #-}
 {-# LANGUAGE FlexibleContexts #-}
 {-# LANGUAGE TypeFamilies #-}
---{-# LANGUAGE AllowAmbiguousTypes #-}
 {-# LANGUAGE TemplateHaskell #-}
+{-# LANGUAGE PolyKinds #-}
+{-# LANGUAGE RoleAnnotations #-}
 --Test
 {-# LANGUAGE TypeApplications #-}
 module Main where
 
-import KindDefaults (Default)
+import KindDefaults.Plugin (Defaultable, Promoteable, Collapsible, Ignoreable)
 
-data Label = L
-           | H 
-           deriving (Show)
+data Label = L | H deriving (Show)
 
-type instance Default Label = L
+data instance Collapsible Label
+type instance Defaultable Label = L
 
-data F (a :: Label) = F deriving (Show)
+newtype F (l :: Label) a = MkF {unF :: a} deriving (Show)
+
+type instance Promoteable (F _ _) = MkF
 
 class Less (l :: Label) (l' :: Label) where
 instance Less L H where
 instance Less l l where
 
-f :: Less H a => F a -> F H
-f F = F
+data instance Ignoreable (Less H L)
+
+type family Max (l :: Label) (l2 :: Label) where
+    Max H _ = H 
+    Max _ H = H
+    Max _ _ = L
+
+f :: Less H a => F a b -> F H b
+f = MkF . unF
+
+f2 :: Max l1 l2 ~ H => F l1 a -> F l2 a
+f2 = MkF . unF
 
 main :: IO ()
 main = do print "hello"
-          print (f F)
+          print (f (MkF True))
+          print (f2 (MkF False))
+          print (True :: F H Bool)
+          print (True :: F L Bool)
