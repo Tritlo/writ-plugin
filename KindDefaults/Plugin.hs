@@ -25,6 +25,8 @@ import Data.Function (on)
 
 import FamInstEnv
 import Finder (findPluginModule)
+import LoadIface (loadPluginInterface)
+import TcRnMonad (initIfaceTcRn)
 
 import TysPrim (equalityTyCon)
 import PrelNames (eqPrimTyConKey)
@@ -164,16 +166,17 @@ data PluginTyCons = PTC { defaultable :: TyCon
 getPluginTyCons :: TcPluginM PluginTyCons
 getPluginTyCons =
    do env <- getTopEnv
-      fpmRes <- tcPluginIO $ findPluginModule env thisModName 
+      fpmRes <- findImportedModule thisModName (Just $ mkFastString "kind-default-plugin")
       case fpmRes of
-         Found _ mod  -> do defaultable <- getTyCon mod "Defaultable"
-                            collapsible <- getTyCon mod "Collapsible"
-                            promoteable <- getTyCon mod "Promoteable"
-                            ignoreable  <- getTyCon mod "Ignoreable"
-                            return $ PTC { defaultable = defaultable,
-                                           collapsible = collapsible,
-                                           promoteable = promoteable,
-                                           ignoreable  = ignoreable }
+         Found _ mod  ->
+             do defaultable <- getTyCon mod "Defaultable"
+                collapsible <- getTyCon mod "Collapsible"
+                promoteable <- getTyCon mod "Promoteable"
+                ignoreable  <- getTyCon mod "Ignoreable"
+                return $ PTC { defaultable = defaultable,
+                               collapsible = collapsible,
+                               promoteable = promoteable,
+                               ignoreable  = ignoreable }
          _ -> pprPanic "Plugin module not found!" empty
   where getTyCon mod name = lookupOrig mod (mkTcOcc name) >>= tcLookupTyCon
 
