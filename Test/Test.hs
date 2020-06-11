@@ -18,7 +18,7 @@
 {-# LANGUAGE TypeApplications #-}
 module Main where
 
-import KindDefaults.Plugin (Default, Promote, Ignore, Equate, EquateAll)
+import KindDefaults.Plugin (Default, Promote, Ignore, Relate)
 import GHC.TypeLits (TypeError(..),ErrorMessage(..))
 
 data Label = L | H deriving (Show)
@@ -27,33 +27,41 @@ data Label = L | H deriving (Show)
 -- oft the kind Label will be defaulted to L
 type instance Default Label = L
 
--- By giving the kind Label a EquateAll instance, we allow L ~ H and H ~ L,
--- but you have to give the user an explanation in the error message.
-type instance EquateAll Label =
-    TypeError (Text "Forbidden flow from Secret (H) to Public (L)!")
-
--- You can also give the kind the more limited Equate instance, which only
+-- You can also give the kind the more limited Relate instance, which 
 -- allows equality between two of the types. I.e. this would allow L ~ H and
--- H ~ L, but not others of kind Label. Since Label only has these two values,
--- the following is equivalent to EquateAll Label
-type instance Equate Label L H =
-    TypeError (Text "Forbidden flow from Secret (H) to Public (L)!")
+-- H ~ L, but not others of kind Label. Si
+type instance Relate Label (n :: Label) (m :: Label) =
+    TypeError (Text "Forbidden flow from "
+                 :<>: LabelPpr (Max n m)
+                 :<>: Text " to "
+                 :<>: LabelPpr (Min n m)
+                 :<>: Text "!")
+
+type family LabelPpr (k :: Label) where
+    LabelPpr L = Text "Public (L)"
+    LabelPpr H = Text "Secret (H)"
 
 -- Giving the constraint (Less H L) an ignoreable instance simply means that
 -- whenever a (Less H L) constraint can't be solved, that is ignored.
-type instance Ignore (Less H L) =
-    TypeError (Text "Forbidden flow from Secret (H) to Public (L)!")
+type instance Ignore (Less n m) =
+    TypeError (Text "Forbidden flow from " 
+                 :<>: LabelPpr (Max n m)
+                 :<>: Text " to "
+                 :<>: LabelPpr (Min n m)
+                 :<>: Text "!")
 
 newtype F (l :: Label) a = MkF {unF :: a} deriving (Show)
 
 -- Promotable (F H _) will change any (a ~ F H b) into Coercible a (F H b), but
 -- only when the label is H. Can also be written as (F _ _), if it should apply
 -- to all labels.
-type instance Promote (F H _) =
-     TypeError (Text "Automatic promotion of unlabeled value to a Secret value!"
+type instance Promote a (F H b) =
+     TypeError (Text "Automatic promotion of unlabeled '"
+                :<>: ShowType a :<>: Text "' to a Secret '" :<>: ShowType b :<>: Text "'!"
                 :$$: Text "Perhaps you intended to use 'box'?")
-type instance Promote (F L _) =
-     TypeError (Text "Automatic promotion of unlabeled value to a Public value!"
+type instance Promote a (F L b) =
+     TypeError (Text "Automatic promotion of unlabeled '"
+                :<>: ShowType a :<>: Text "' to a Public '" :<>: ShowType b :<>: Text "'!"
                 :$$: Text "Perhaps you intended to use 'box'?")
 
 class Less (l :: Label) (l' :: Label) where
@@ -62,10 +70,14 @@ instance Less l l where
 
 newtype Age = MkAge Int deriving (Show)
 
-type family Max (l :: Label) (l2 :: Label) where
+type family (Max (l :: Label) (l2 :: Label)) ::Label where
     Max H _ = H 
     Max _ H = H
     Max _ _ = L
+
+type family Min (l :: Label) (l2 :: Label) where
+    Min L _ = L
+    Min _ l = l
 
 f :: Less H a => F a b -> F H b
 f = MkF . unF
