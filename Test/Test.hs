@@ -1,5 +1,6 @@
 {-# OPTIONS_GHC -fplugin KindDefaults.Plugin
                 -fplugin-opt=KindDefaults.Plugin:debug
+                -fplugin-opt=KindDefaults.Plugin:defer
                  #-}
 -- Plugin:
 {-# LANGUAGE DataKinds #-}
@@ -21,8 +22,8 @@ import KindDefaults.Plugin (Defaultable, Promoteable, Collapsible, Ignoreable)
 import GHC.TypeLits (TypeError(..),ErrorMessage(..))
 
 data Label = L | H deriving (Show)
-type instance Defaultable Label =
-    '(L, TypeError (Text "Defaulting Label to Public (L)!"))
+
+type instance Defaultable Label = L
 
 type instance Collapsible Label =
     TypeError (Text "Forbidden flow from Secret (H) to Public (L)!")
@@ -42,6 +43,7 @@ class Less (l :: Label) (l' :: Label) where
 instance Less L H where
 instance Less l l where
 
+newtype Age = MkAge Int deriving (Show)
 
 type family Max (l :: Label) (l2 :: Label) where
     Max H _ = H 
@@ -54,17 +56,21 @@ f = MkF . unF
 f2 :: Max l1 l2 ~ H => F l1 a -> F l2 a
 f2 = MkF . unF
 
-f3 :: Less H L => F a b -> F H b
+f3 :: Less H L => F a b -> F a b
 f3 = MkF . unF
-
-f4 :: Less H L => F a b -> F a b
-f4 = MkF . unF
 
 main :: IO ()
 main = do print "hello"
+          -- We can solve (Less H a) by defaulting a ~ L, and then solving
+          -- Less H L by ignoring it.
           print (f (MkF True))
+          -- By defaulting l1 and l2 to L, Max l1 l2 becomes L
+          -- we then solve this by collapsing L ~ H.
           print (f2 (MkF False))
           print (f3 (MkF 0))
-          print (f4 (MkF [10]))
+          -- We can promote automatically, ignoring the labels.
           print (True :: F H Bool)
           print (True :: F L Bool)
+          -- Not that we are turning this into a coercion, so that if
+          -- Int is coercible to Age, the promotion works.
+          print ((1 :: Int) :: F L Age)

@@ -4,6 +4,7 @@
 {-# LANGUAGE ConstraintKinds #-}
 {-# LANGUAGE TypeFamilies #-}
 {-# LANGUAGE RecordWildCards #-}
+{-# LANGUAGE DeriveDataTypeable #-}
 module KindDefaults.Plugin (
       plugin,
       Defaultable, Collapsible, Promoteable, Ignoreable
@@ -16,7 +17,7 @@ import Constraint
 import ErrUtils (Severity(SevWarning))
 import TcEvidence (EvTerm, evCoercion)
 
-import Control.Monad (when, guard)
+import Control.Monad (when, guard, foldM)
 import Data.Maybe (mapMaybe, catMaybes, fromMaybe)
 import Data.Either
 import Data.IORef
@@ -33,6 +34,7 @@ import PrelNames (eqPrimTyConKey)
 import Predicate (EqRel(NomEq), isEqPrimPred)
 
 import Data.Kind (Constraint)
+import Data.Data (Data, toConstr)
 
 import GHC.TypeLits(TypeError(..), ErrorMessage(..))
 
@@ -50,7 +52,7 @@ plugin = defaultPlugin { tcPlugin = Just . kindDefaultPlugin
 -- Defaultable means that if we have an ambiguous l1 of kind k, we can default
 -- it to be the rhs, i.e. type family Defaultable Label = L would default all
 -- ambiguous type variables of kind Label to L
-type family Defaultable k :: (k,ErrorMessage)
+type family Defaultable k :: k
 
 -- Promoteable means that if we have a value (True :: Bool), we can promote it
 -- to (k Bool)
@@ -65,43 +67,53 @@ type family Collapsible k :: ErrorMessage
 
 --------------------------------------------------------------------------------
 
-data Log = LogDefaultable Type CtLoc
-         | LogIgnoreable Type CtLoc
-         | LogCollapsible Type CtLoc
-         | LogPromoteable Type CtLoc
+data Log = LogDefaultable Type RealSrcSpan
+         | LogCollapsible Type RealSrcSpan
+         | LogPromoteable Type RealSrcSpan
+         | LogIgnoreable  Type RealSrcSpan deriving (Data)
 
-logSrc :: Log -> CtLoc
+logSrc :: Log -> RealSrcSpan
 logSrc (LogDefaultable _ l) = l
-logSrc (LogIgnoreable _ l) = l
 logSrc (LogCollapsible _ l) = l
 logSrc (LogPromoteable _ l) = l
+logSrc (LogIgnoreable  _ l) = l
+
+logTy :: Log -> Type
+logTy (LogDefaultable t _) = t
+logTy (LogCollapsible t _) = t
+logTy (LogPromoteable t _) = t
+logTy (LogIgnoreable  t _) = t
+
+-- Log prec determines in which order the warnings show up if  two show up in
+-- the same location. We want Defaultable to show up first, since it's often the
+-- case that the others are a result of having defaulted a type variable.
+logPrec :: Log -> Int
+logPrec (LogDefaultable t _) = 1
+logPrec (LogCollapsible t _) = 2
+logPrec (LogPromoteable t _) = 3
+logPrec (LogIgnoreable  t _) = 4
 
 instance Ord Log where
-  compare = compare `on` (ctLocSpan . logSrc)
+  compare a b = case (compare `on` logSrc) a b of
+                    EQ -> (compare `on` logPrec) a b
+                    r -> r
 
 instance Eq Log where
-   LogIgnoreable t1 l1 == LogIgnoreable t2 l2 =
-       ctLocSpan l1 == ctLocSpan l2 && t1 `eqType` t2
-   LogCollapsible a1 l1 == LogCollapsible a2 l2 =
-       ctLocSpan l1 == ctLocSpan l2 && a1 `eqType` a2
-   LogPromoteable a1 l1 == LogPromoteable a2 l2 =
-       ctLocSpan l1 == ctLocSpan l2 && a1 `eqType` a2
-   LogDefaultable v1 l1 == LogDefaultable v2 l2 =
-       ctLocSpan l1 == ctLocSpan l2 && v1 `eqType` v2
-   _ == _ = False
+   logA == logB = (((==) `on` toConstr) logA logB)
+                  && (((==) `on` logSrc) logA logB)
+                  && ((eqType `on` logTy) logA logB)
 
 instance Outputable Log where
    ppr (LogDefaultable ty _) = text "Defaulting:" <+> pprUserTypeErrorTy ty
-   ppr (LogIgnoreable ty _)  = text "Ignoring:" <+> pprUserTypeErrorTy ty
    ppr (LogCollapsible ty _) = text "Collapsing:" <+> pprUserTypeErrorTy ty
-   ppr (LogPromoteable ty _) = text "Promoting:" <+> pprUserTypeErrorTy ty
+   ppr (LogPromoteable ty _) = text "Promoting:"  <+> pprUserTypeErrorTy ty
+   ppr (LogIgnoreable  ty _) = text "Ignoring:"   <+> pprUserTypeErrorTy ty
 
 addWarning :: DynFlags -> Log -> IO()
 addWarning dflags log = warn (ppr log)
-  where
-      warn = putLogMsg dflags NoReason SevWarning
-                      (RealSrcSpan $ ctLocSpan $ logSrc log)
-                      (defaultErrStyle dflags)
+  where warn = putLogMsg dflags NoReason SevWarning
+                         (RealSrcSpan $ logSrc log)
+                         (defaultErrStyle dflags)
 
 data Mode = Defer | NoDefer deriving (Eq, Ord, Show)
 
@@ -127,36 +139,24 @@ kindDefaultPlugin opts = TcPlugin initialize solve stop
         ; mapM_ (pprDebug "Wanted:") wanted
         ; instEnvs <- getFamInstEnvs
         ; pluginTyCons <- getPluginTyCons
-        ; (extra, proofs) <- return ([], [])
-        ; unsolved <- return wanted
-        -- TODO: These are all almost identical, they could probably be 
-        -- collapsed (pun intended) in a nice way.
-        -- Ignoreables
-        ; (unsolved, (solved, more, logs)) <-
-            inspectSol <$> mapM (solveIgnoreable mode instEnvs pluginTyCons) unsolved
-        ; mapM_ (pprDebug "Ignoring:") solved
-        ; tcPluginIO $ modifyIORef warns (logs ++) 
-        ; (extra, proofs) <- return (extra ++ more, proofs ++ solved)
-        -- Defaultables
-        ; (unsolved, (solved, more, logs)) <-
-            inspectSol <$> mapM (solveDefaultable mode instEnvs pluginTyCons) unsolved
-        ; mapM_ (pprDebug "Defaulting:") more
-        ; tcPluginIO $ modifyIORef warns (logs ++) 
-        ; (extra, proofs) <- return (extra ++ more, proofs ++ solved)
-        -- Collapsibles
-        ; (unsolved, (solved, more, logs)) <-
-            inspectSol <$> mapM (solveCollapsible mode instEnvs pluginTyCons) unsolved
-        ; mapM_ (pprDebug "Collapsing:") solved
-        ; tcPluginIO $ modifyIORef warns (logs ++) 
-        ; (extra, proofs) <- return (extra ++ more, proofs ++ solved)
-        -- Promoteables
-        ; (unsolved, (solved, more, logs)) <-
-            inspectSol <$> mapM (solvePromoteable mode instEnvs pluginTyCons) unsolved
-        ; mapM_ (pprDebug "Promoting:") solved
-        ; tcPluginIO $ modifyIORef warns (logs ++) 
-        ; (extra, proofs) <- return (extra ++ more, proofs ++ solved)
 
-        ; return $ TcPluginOk proofs extra }
+        ; let solveWFun (unsolved, (solved, more, logs)) (solveFun, explain) =
+                do  {(still_unsolved, (new_solved, new_more, new_logs)) <-
+                         inspectSol <$>
+                            mapM (solveFun mode instEnvs pluginTyCons) unsolved
+                    ; mapM_ (pprDebug (explain ++ "-sols")) new_solved
+                    ; mapM_ (pprDebug (explain ++ "-more")) new_more
+                    ; mapM_ (pprDebug (explain ++ "-logs")) new_logs
+                    ; return (still_unsolved, (solved ++ new_solved,
+                                               more ++ new_more,
+                                               logs ++ new_logs)) }
+        ; (unsolved, (solved, more, logs)) <-
+             foldM solveWFun (wanted, ([],[],[])) [ (solveIgnoreable, "Ignoring")
+                                                  , (solveDefaultable, "Defaulting")
+                                                  , (solveCollapsible, "Collapsing")
+                                                  , (solvePromoteable, "Promoting") ]
+        ; tcPluginIO $ modifyIORef warns (logs ++) 
+        ; return $ TcPluginOk solved more }
      stop warns =
         do { dflags <- unsafeTcPluginTcM getDynFlags
            ; when (mode == Defer) $
@@ -186,9 +186,9 @@ getPluginTyCons =
   where getTyCon mod name = lookupOrig mod (mkTcOcc name) >>= tcLookupTyCon
 
 
-type Solution = Either Ct (Maybe (EvTerm, Ct),-- The solution to the Ct
-                           [Ct],-- Possible additional work
-                           [Log])
+type Solution = Either Ct (Maybe (EvTerm, Ct), -- The solution to the Ct
+                           [Ct],               -- Possible additional work
+                           [Log])              -- What we did
 
 
 solveDefaultable :: Mode -> FamInstEnvs -> PluginTyCons -> Ct -> TcPluginM Solution
@@ -202,20 +202,22 @@ solveDefaultable Defer famInsts PTC{..} ct =
          mkDefaultCt var =
            case lookupFamInstEnv famInsts defaultable [varType var] of
              [FamInstMatch {fim_instance=FamInst{fi_rhs=def}}] ->
-                case splitTyConApp_maybe def of
-                   Just (_, [k1,k2,dTo,msg]) | k1 `eqType` (varType var) ->
-                      do ref <- tcPluginIO $ newIORef Nothing
-                         let kind = varType var
-                             eqTo = dTo
-                             eqNom = equalityTyCon Nominal
-                             predTy = mkTyConApp eqNom [kind, kind, mkTyVarTy var, eqTo]
-                             hole = CoercionHole {ch_co_var=var, ch_ref = ref}
-                             ev = CtWanted {ctev_pred = predTy, ctev_nosh = WDeriv,
-                                            ctev_dest = HoleDest hole,
-                                            ctev_loc = ctLoc ct}
-                         return $ Just (CTyEqCan {cc_ev = ev, cc_tyvar = var,
-                                                  cc_rhs = eqTo, cc_eq_rel = NomEq},
-                                         LogDefaultable (fromMaybe msg (userTypeError_maybe msg)) (ctLoc ct))
+               do ref <- tcPluginIO $ newIORef Nothing
+                  let kind = varType var
+                      -- Here we shortcut and output var ~ def, but we could also
+                      -- use the type family directly by writing
+                      --      rhs = mkTyConApp defaultable [kind]
+                      -- which would result in var ~ Defaultable kind
+                      rhs = def
+                      eqNom = equalityTyCon Nominal
+                      predTy = mkTyConApp eqNom [kind, kind, mkTyVarTy var, rhs]
+                      hole = CoercionHole {ch_co_var=var, ch_ref = ref}
+                      ev = CtWanted {ctev_pred = predTy , ctev_nosh = WDeriv,
+                                     ctev_dest = HoleDest hole,
+                                     ctev_loc = ctLoc ct}
+                  return $ Just (CTyEqCan {cc_ev = ev, cc_tyvar = var,
+                                          cc_rhs = rhs, cc_eq_rel = NomEq},
+                                 LogDefaultable predTy (ctLocSpan $ ctLoc ct))
              _ -> return Nothing
 
 solveIgnoreable :: Mode -> FamInstEnvs -> PluginTyCons -> Ct -> TcPluginM Solution
@@ -223,12 +225,12 @@ solveIgnoreable mode famInsts PTC{..} ct =
    case lookupFamInstEnv famInsts ignoreable [ctPred ct] of
       [] -> return $ Left ct
       [FamInstMatch {fim_instance=FamInst{fi_rhs=def}}] ->
-          do nw <- return $ (ctEvidence ct) {ctev_pred = def}
+          do let new_ev = (ctEvidence ct) {ctev_pred = def}
              return $ Right (Just (evCoercion coercion, ct),
                               case mode of
                                 Defer -> []
-                                NoDefer -> [CNonCanonical {cc_ev=nw}],
-                             [LogIgnoreable  (fromMaybe def $ userTypeError_maybe def) (ctLoc ct)])
+                                NoDefer -> [CNonCanonical {cc_ev=new_ev}],
+                             [LogIgnoreable  (unwrapIfMsg def) (ctLocSpan $ ctLoc ct)])
    where (coercion, _) = normaliseType famInsts Phantom (ctPred ct)
 
 solveCollapsible :: Mode -> FamInstEnvs -> PluginTyCons -> Ct -> TcPluginM Solution
@@ -239,14 +241,15 @@ solveCollapsible mode famInsts PTC{..} ct =
             case lookupFamInstEnv famInsts collapsible [k1] of
                [] -> return $ Left ct
                [FamInstMatch {fim_instance=FamInst{fi_rhs=def}}] ->
-                  do nw <- return $ (ctEvidence ct) {ctev_pred = def}
+                  do let new_ev = (ctEvidence ct) {ctev_pred = def}
                      return $ Right (Just (evCoercion $ mkReflCo Phantom ty2, ct),
                                      case mode of
                                        Defer -> []
-                                       NoDefer -> [CNonCanonical {cc_ev=nw}],
-                                      [LogCollapsible (fromMaybe def $ userTypeError_maybe def) (ctLoc ct)])
+                                       NoDefer -> [CNonCanonical {cc_ev=new_ev}],
+                                      [LogCollapsible (unwrapIfMsg def) (ctLocSpan $ ctLoc ct)])
       _ -> return $ Left ct
 
+-- Solve promoteable turns a ~ B c into Coercible a (B c)
 solvePromoteable :: Mode -> FamInstEnvs -> PluginTyCons -> Ct -> TcPluginM Solution
 solvePromoteable mode famInsts PTC{..} ct =
    case splitTyConApp_maybe (ctPred ct) of 
@@ -258,12 +261,17 @@ solvePromoteable mode famInsts PTC{..} ct =
              do let pty = case mode of
                             Defer -> mkTyConApp eqRep args
                             NoDefer -> def
-                nw <- return $ (ctEvidence ct) {ctev_pred = pty}
+                    nw = (ctEvidence ct) {ctev_pred = pty}
                 return $ Right (Just (evCoercion $ mkReflCo Representational ty2, ct),
                                [CNonCanonical {cc_ev=nw}],
-                               [LogPromoteable (fromMaybe def $ userTypeError_maybe def) (ctLoc ct)])
+                               [LogPromoteable (unwrapIfMsg def) (ctLocSpan $ ctLoc ct)])
       _ -> return $ Left ct
   where eqRep = equalityTyCon Representational
+
+-- Utils
+
+unwrapIfMsg :: Type -> Type
+unwrapIfMsg def = fromMaybe def $ userTypeError_maybe def
 
 inspectSol :: [Either a (Maybe b, [c], [d])] -> ([a], ([b], [c], [d]))
 inspectSol xs = (ls, (catMaybes sols, concat more, concat logs))
