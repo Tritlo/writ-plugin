@@ -32,11 +32,8 @@ type instance Default Label = L
 -- directly (e.g. Relate Label L H), or use variables. If you use the variables,
 -- you can further compute to e.g. pretty print the labels.
 type instance Relate Label (n :: Label) (m :: Label) =
-    TypeError (Text "Forbidden flow from "
-                 :<>: LabelPpr (Max n m)
-                 :<>: Text " to "
-                 :<>: LabelPpr (Min n m)
-                 :<>: Text "!")
+    TypeError (Text "Forbidden flow from " :<>: LabelPpr (Max n m)
+               :<>: Text " to " :<>: LabelPpr (Min n m) :<>: Text "!")
 
 type family LabelPpr (k :: Label) where
     LabelPpr L = Text "Public (L)"
@@ -45,11 +42,8 @@ type family LabelPpr (k :: Label) where
 -- Giving the constraint (Less H L) an ignoreable instance simply means that
 -- whenever a (Less H L) constraint can't be solved, that is ignored.
 type instance Ignore (Less n m) =
-    TypeError (Text "Forbidden flow from "
-                 :<>: LabelPpr (Max n m)
-                 :<>: Text " to "
-                 :<>: LabelPpr (Min n m)
-                 :<>: Text "!")
+    TypeError (Text "Forbidden flow from " :<>: LabelPpr (Max n m)
+              :<>: Text " to " :<>: LabelPpr (Min n m) :<>: Text "!")
 
 newtype F (l :: Label) a = MkF {unF :: a} deriving (Show)
 

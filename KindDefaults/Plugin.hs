@@ -281,7 +281,7 @@ solvePromote mode famInsts PTC{..} ct =
       _ -> return $ Left ct
   where eqRep = equalityTyCon Representational
 
-type family Report (err :: ErrorMessage)  :: Constraint
+type family Report (err :: ErrorMessage)  :: Constraint where
 -- Solve Report is our way of computing whatever type familes that might be in
 -- a given type error before emitting it as a warning.
 solveReport :: Mode -> FamInstEnvs -> PluginTyCons -> Ct -> TcPluginM Solution
