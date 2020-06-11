@@ -27,9 +27,10 @@ data Label = L | H deriving (Show)
 -- oft the kind Label will be defaulted to L
 type instance Default Label = L
 
--- You can also give the kind the more limited Relate instance, which 
--- allows equality between two of the types. I.e. this would allow L ~ H and
--- H ~ L, but not others of kind Label. Si
+-- You can also give the kind the Relate instance, which allows equality
+-- between two of the types. You can either specify the types to match
+-- directly (e.g. Relate Label L H), or use variables. If you use the variables,
+-- you can further compute to e.g. pretty print the labels.
 type instance Relate Label (n :: Label) (m :: Label) =
     TypeError (Text "Forbidden flow from "
                  :<>: LabelPpr (Max n m)
@@ -44,7 +45,7 @@ type family LabelPpr (k :: Label) where
 -- Giving the constraint (Less H L) an ignoreable instance simply means that
 -- whenever a (Less H L) constraint can't be solved, that is ignored.
 type instance Ignore (Less n m) =
-    TypeError (Text "Forbidden flow from " 
+    TypeError (Text "Forbidden flow from "
                  :<>: LabelPpr (Max n m)
                  :<>: Text " to "
                  :<>: LabelPpr (Min n m)

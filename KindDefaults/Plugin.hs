@@ -59,7 +59,7 @@ type family Default k :: k
 -- Note that Promote a k requires Coercible a k, otherwise a Coercible error  will be produced.
 type family Promote (a :: *) (k :: *) :: ErrorMessage
 
--- An ignore constraint means that we don't care if it isn't solved. 
+-- An Ignore cons means that we are allowd to ignore the constraint con.
 -- Note! This only works for empty classes!
 type family Ignore (k :: Constraint) :: ErrorMessage
 
@@ -96,15 +96,14 @@ instance Outputable Log where
                                                && isTyVarTy ty1 ->
                         text "Defaulting"
                         -- We want to print a instead of a0
-                        <+> ppr (occName $ getTyVar "isTyVarTy lied!" ty1)
-                        <+> dcolon <+> ppr k1
-                        <+> text "to" <+>
-                              -- We want to print L instead of 'L if possible
-                              case (do (tc, []) <- splitTyConApp_maybe ty2
-                                       dc <- isPromotedDataCon_maybe tc
-                                       return dc) of
-                                 Just dc -> ppr dc
-                                 _ -> ppr ty2
+                        <+> quotes (ppr (occName $ getTyVar "isTyVarTy lied!" ty1)
+                                    <+> dcolon <+> ppr k1)
+                        <+> text "to"
+                        -- We want to print L instead of 'L if possible
+                        <+> quotes ( case (do (tc, []) <- splitTyConApp_maybe ty2
+                                              isPromotedDataCon_maybe tc) of
+                                        Just dc -> ppr dc
+                                        _ -> ppr ty2)
                    _ -> text "SACRED" <+> ppr ty
 
 addWarning :: DynFlags -> Log -> IO()

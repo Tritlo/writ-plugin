@@ -30,7 +30,7 @@ Example:
 {-# LANGUAGE TypeApplications #-}
 module Main where
 
-import KindDefaults.Plugin (Default, Promote, Ignore, Equate, EquateAll)
+import KindDefaults.Plugin (Default, Promote, Ignore, Relate)
 import GHC.TypeLits (TypeError(..),ErrorMessage(..))
 
 data Label = L | H deriving (Show)
@@ -39,33 +39,42 @@ data Label = L | H deriving (Show)
 -- oft the kind Label will be defaulted to L
 type instance Default Label = L
 
--- By giving the kind Label a EquateAll instance, we allow L ~ H and H ~ L,
--- but you have to give the user an explanation in the error message.
-type instance EquateAll Label =
-    TypeError (Text "Forbidden flow from Secret (H) to Public (L)!")
+-- You can also give the kind the Relate instance, which allows equality
+-- between two of the types. You can either specify the types to match
+-- directly (e.g. Relate Label L H), or use variables. If you use the variables,
+-- you can further compute to e.g. pretty print the labels.
+type instance Relate Label (n :: Label) (m :: Label) =
+    TypeError (Text "Forbidden flow from "
+                 :<>: LabelPpr (Max n m)
+                 :<>: Text " to "
+                 :<>: LabelPpr (Min n m)
+                 :<>: Text "!")
 
--- You can also give the kind the more limited Equate instance, which only
--- allows equality between two of the types. I.e. this would allow L ~ H and
--- H ~ L, but not others of kind Label. Since Label only has these two values,
--- the following is equivalent to EquateAll Label
-type instance Equate Label L H =
-    TypeError (Text "Forbidden flow from Secret (H) to Public (L)!")
+type family LabelPpr (k :: Label) where
+    LabelPpr L = Text "Public (L)"
+    LabelPpr H = Text "Secret (H)"
 
 -- Giving the constraint (Less H L) an ignoreable instance simply means that
 -- whenever a (Less H L) constraint can't be solved, that is ignored.
-type instance Ignore (Less H L) =
-    TypeError (Text "Forbidden flow from Secret (H) to Public (L)!")
+type instance Ignore (Less n m) =
+    TypeError (Text "Forbidden flow from "
+                 :<>: LabelPpr (Max n m)
+                 :<>: Text " to "
+                 :<>: LabelPpr (Min n m)
+                 :<>: Text "!")
 
 newtype F (l :: Label) a = MkF {unF :: a} deriving (Show)
 
 -- Promotable (F H _) will change any (a ~ F H b) into Coercible a (F H b), but
 -- only when the label is H. Can also be written as (F _ _), if it should apply
 -- to all labels.
-type instance Promote (F H _) =
-     TypeError (Text "Automatic promotion of unlabeled value to a Secret value!"
+type instance Promote a (F H b) =
+     TypeError (Text "Automatic promotion of unlabeled '"
+                :<>: ShowType a :<>: Text "' to a Secret '" :<>: ShowType b :<>: Text "'!"
                 :$$: Text "Perhaps you intended to use 'box'?")
-type instance Promote (F L _) =
-     TypeError (Text "Automatic promotion of unlabeled value to a Public value!"
+type instance Promote a (F L b) =
+     TypeError (Text "Automatic promotion of unlabeled '"
+                :<>: ShowType a :<>: Text "' to a Public '" :<>: ShowType b :<>: Text "'!"
                 :$$: Text "Perhaps you intended to use 'box'?")
 
 class Less (l :: Label) (l' :: Label) where
@@ -74,10 +83,14 @@ instance Less l l where
 
 newtype Age = MkAge Int deriving (Show)
 
-type family Max (l :: Label) (l2 :: Label) where
+type family (Max (l :: Label) (l2 :: Label)) ::Label where
     Max H _ = H 
     Max _ H = H
     Max _ _ = L
+
+type family Min (l :: Label) (l2 :: Label) where
+    Min L _ = L
+    Min _ l = l
 
 f :: Less H a => F a b -> F H b
 f = MkF . unF
@@ -110,70 +123,59 @@ main = do print "hello"
           -- Not that we are turning this into a coercion, so that if
           -- Int is coercible to Age, the promotion works.
           print ((1 :: Int) :: F L Age)
+
 ```
 
 This will output:
 
 ```console
-Test.hs:86:18: warning: Defaulting: a0 ~ 'L
+Test.hs:98:18: warning: Defaulting ‘a :: Label’ to ‘L’
    |
-86 |           print (f (MkF True))
+98 |           print (f (MkF True))
    |                  ^^^^^^^^^^^^
 
-Test.hs:86:18: warning:
-    Ignoring: Forbidden flow from Secret (H) to Public (L)!
-   |
-86 |           print (f (MkF True))
-   |                  ^^^^^^^^^^^^
+Test.hs:101:18: warning:
+    Forbidden flow from Secret (H) to Public (L)!
+    |
+101 |           print (f2 (MkF False))
+    |                  ^^^^^^^^^^^^^^
 
-Test.hs:89:18: warning: Defaulting: l10 ~ 'L
-   |
-89 |           print (f2 (MkF False))
-   |                  ^^^^^^^^^^^^^^
+Test.hs:101:18: warning: Defaulting ‘l1 :: Label’ to ‘L’
+    |
+101 |           print (f2 (MkF False))
+    |                  ^^^^^^^^^^^^^^
 
-Test.hs:89:18: warning: Defaulting: l20 ~ 'L
-   |
-89 |           print (f2 (MkF False))
-   |                  ^^^^^^^^^^^^^^
+Test.hs:101:18: warning: Defaulting ‘l2 :: Label’ to ‘L’
+    |
+101 |           print (f2 (MkF False))
+    |                  ^^^^^^^^^^^^^^
 
-Test.hs:89:18: warning:
-    Equating: Forbidden flow from Secret (H) to Public (L)!
-   |
-89 |           print (f2 (MkF False))
-   |                  ^^^^^^^^^^^^^^
+Test.hs:104:18: warning:
+    Forbidden flow from Secret (H) to Public (L)!
+    |
+104 |           print (f3 (MkF 0))
+    |                  ^^^^^^^^^^
 
-Test.hs:92:18: warning:
-    Equating: Forbidden flow from Secret (H) to Public (L)!
-   |
-92 |           print (f3 (MkF 0))
-   |                  ^^^^^^^^^^
+Test.hs:107:18: warning:
+    Automatic promotion of unlabeled 'Bool' to a Secret 'Bool'!
+    Perhaps you intended to use 'box'?
+    |
+107 |           print (True :: F H Bool)
+    |                  ^^^^
 
-Test.hs:93:18: warning:
-    Ignoring: Forbidden flow from Secret (H) to Public (L)!
-   |
-93 |           print (f4 (MkF 0))
-   |                  ^^^^^^^^^^
+Test.hs:108:18: warning:
+    Automatic promotion of unlabeled 'Bool' to a Public 'Bool'!
+    Perhaps you intended to use 'box'?
+    |
+108 |           print (True :: F L Bool)
+    |                  ^^^^
 
-Test.hs:95:18: warning:
-    Promoting: Automatic promotion of unlabeled value to a Secret value!
-               Perhaps you intended to use 'box'?
-   |
-95 |           print (True :: F H Bool)
-   |                  ^^^^
-
-Test.hs:96:18: warning:
-    Promoting: Automatic promotion of unlabeled value to a Public value!
-               Perhaps you intended to use 'box'?
-   |
-96 |           print (True :: F L Bool)
-   |                  ^^^^
-
-Test.hs:99:19: warning:
-    Promoting: Automatic promotion of unlabeled value to a Public value!
-               Perhaps you intended to use 'box'?
-   |
-99 |           print ((1 :: Int) :: F L Age)
-   |                   ^^^^^^^^
+Test.hs:111:19: warning:
+    Automatic promotion of unlabeled 'Int' to a Public 'Age'!
+    Perhaps you intended to use 'box'?
+    |
+111 |           print ((1 :: Int) :: F L Age)
+    |                   ^^^^^^^^
 Linking /home/tritlo/kind-default-plugin/dist-newstyle/build/x86_64-linux/ghc-8.10.1/Test-1.0.0/x/test/build/test/test ...
 "hello"
 MkF {unF = True}
