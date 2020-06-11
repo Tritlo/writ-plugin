@@ -281,7 +281,11 @@ solvePromote mode famInsts PTC{..} ct =
       _ -> return $ Left ct
   where eqRep = equalityTyCon Representational
 
-type family Report (err :: ErrorMessage)  :: Constraint where
+-- Report is a type family we use to wrap TypeErrors so that any type families
+-- within can be computed. It's closed, so we know that the only instances of
+-- Report will be the ones we generated.
+type family Report (err :: ErrorMessage) :: Constraint where
+
 -- Solve Report is our way of computing whatever type familes that might be in
 -- a given type error before emitting it as a warning.
 solveReport :: Mode -> FamInstEnvs -> PluginTyCons -> Ct -> TcPluginM Solution
