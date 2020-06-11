@@ -35,9 +35,9 @@ type instance Collapsible Label =
     TypeError (Text "Forbidden flow from Secret (H) to Public (L)!")
 
 -- You can also give the kind the more limited Equivable instance, which only
--- allows equiality between two of the types, in one direction. I.e. this would
--- allow L ~ H, but not H ~ L. Useful for when you only want some members of a
--- kind to be equivalent, but not others.
+-- allows equality between two of the types. I.e. this would allow L ~ H and
+-- H ~ L, but not others of kind Label. Since Label only has these two values,
+-- the following is equivalent to Collapsible Label
 type instance Equivable Label L H =
     TypeError (Text "Forbidden flow from Secret (H) to Public (L)!")
 

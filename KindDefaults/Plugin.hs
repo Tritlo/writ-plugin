@@ -66,7 +66,7 @@ type family Ignoreable (k :: Constraint) :: ErrorMessage
 type family Collapsible k :: ErrorMessage
 
 -- Equivable is a more restricted version of collapsible, which means that we
--- are allowed to discharge (a :: k) ~ (b :: k).
+-- are allowed to discharge (a :: k) ~ (b :: k) and (b :: k) ~ (a :: k).
 type family Equivable k (a :: k) (b :: k):: ErrorMessage
 --------------------------------------------------------------------------------
 
@@ -264,15 +264,16 @@ solveCollapsible mode famInsts PTC{..} ct =
                                       [LogCollapsible (unwrapIfMsg def) (ctLocSpan $ ctLoc ct)])
       _ -> return $ Left ct
 
--- Solves (a :: k) ~ (b :: k) if Equivable k a b
+-- Solves (a :: k) ~ (b :: k) if Equivable k a b or Equivable k b a
 solveEquivable :: Mode -> FamInstEnvs -> PluginTyCons -> Ct -> TcPluginM Solution
 solveEquivable mode famInsts PTC{..} ct =
    case splitTyConApp_maybe (ctPred ct) of
       Just (tyCon, [k1,k2,ty1,ty2]) | isEqPrimPred (ctPred ct)
                                       && k1 `eqType` k2 ->
-            case lookupFamInstEnv famInsts equivable [k1, ty1, ty2] of
+            case  (lookupFamInstEnv famInsts equivable [k1, ty1, ty2])
+               ++ (lookupFamInstEnv famInsts equivable [k1, ty2, ty1]) of
                [] -> return $ Left ct
-               [FamInstMatch {fim_instance=FamInst{fi_rhs=def}}] ->
+               (FamInstMatch {fim_instance=FamInst{fi_rhs=def}}:_) ->
                   do let new_ev = (ctEvidence ct) {ctev_pred = def}
                      return $ Right (Just (evCoercion $ mkReflCo Phantom ty2, ct),
                                      case mode of
