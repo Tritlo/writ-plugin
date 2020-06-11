@@ -10,7 +10,8 @@ Example:
 
 ```haskell
 {-# OPTIONS_GHC -fplugin KindDefaults.Plugin
-                -fplugin-opt=KindDefaults.Plugin:defer #-}
+                -fplugin-opt=KindDefaults.Plugin:defer
+                 #-}
 -- Plugin:
 {-# LANGUAGE DataKinds #-}
 {-# LANGUAGE KindSignatures #-}
@@ -27,7 +28,8 @@ Example:
 {-# LANGUAGE TypeApplications #-}
 module Main where
 
-import KindDefaults.Plugin (Defaultable, Promoteable, Collapsible, Ignoreable)
+import KindDefaults.Plugin (Defaultable, Promoteable, Collapsible,
+                            Ignoreable, Equivable)
 import GHC.TypeLits (TypeError(..),ErrorMessage(..))
 
 data Label = L | H deriving (Show)
@@ -40,6 +42,13 @@ type instance Defaultable Label = L
 -- By giving the kind Label a Collapsible instance, we allow L ~ H and H ~ L,
 -- but you have to give the user an explanation in the error message.
 type instance Collapsible Label =
+    TypeError (Text "Forbidden flow from Secret (H) to Public (L)!")
+
+-- You can also give the kind the more limited Equivable instance, which only
+-- allows equiality between two of the types, in one direction. I.e. this would
+-- allow L ~ H, but not H ~ L. Useful for when you only want some members of a
+-- kind to be equivalent, but not others.
+type instance Equivable Label L H =
     TypeError (Text "Forbidden flow from Secret (H) to Public (L)!")
 
 -- Giving the constraint (Less H L) an ignoreable instance simply means that
@@ -76,8 +85,12 @@ f = MkF . unF
 f2 :: Max l1 l2 ~ H => F l1 a -> F l2 a
 f2 = MkF . unF
 
-f3 :: Less H L => F a b -> F a b
+f3 :: H ~ L => F l1 a -> F l2 a
 f3 = MkF . unF
+
+f4 :: Less H L => F a b -> F a b
+f4 = MkF . unF
+
 
 main :: IO ()
 main = do print "hello"
@@ -85,77 +98,88 @@ main = do print "hello"
           -- Less H L by ignoring it.
           print (f (MkF True))
           -- By defaulting l1 and l2 to L, Max l1 l2 becomes L
-          -- we then solve this by collapsing L ~ H.
+          -- we then solve this by equivaling L ~ H.
           print (f2 (MkF False))
+          -- Here we're asked to solve H ~ L, which we can do by collapsing
+          -- Label.
           print (f3 (MkF 0))
+          print (f4 (MkF 0))
           -- We can promote automatically, ignoring the labels.
           print (True :: F H Bool)
           print (True :: F L Bool)
           -- Not that we are turning this into a coercion, so that if
           -- Int is coercible to Age, the promotion works.
           print ((1 :: Int) :: F L Age)
+
 ```
 
 This will output:
 
 ```console
-Test.hs:77:18: warning: Defaulting: a0 ~ 'L
+Test.hs:89:18: warning: Defaulting: a0 ~ 'L
    |
-77 |           print (f (MkF True))
+89 |           print (f (MkF True))
    |                  ^^^^^^^^^^^^
 
-Test.hs:77:18: warning:
+Test.hs:89:18: warning:
     Ignoring: Forbidden flow from Secret (H) to Public (L)!
    |
-77 |           print (f (MkF True))
+89 |           print (f (MkF True))
    |                  ^^^^^^^^^^^^
 
-Test.hs:80:18: warning: Defaulting: l10 ~ 'L
+Test.hs:92:18: warning: Defaulting: l10 ~ 'L
    |
-80 |           print (f2 (MkF False))
+92 |           print (f2 (MkF False))
    |                  ^^^^^^^^^^^^^^
 
-Test.hs:80:18: warning: Defaulting: l20 ~ 'L
+Test.hs:92:18: warning: Defaulting: l20 ~ 'L
    |
-80 |           print (f2 (MkF False))
+92 |           print (f2 (MkF False))
    |                  ^^^^^^^^^^^^^^
 
-Test.hs:80:18: warning:
+Test.hs:92:18: warning:
+    Equivaling: Forbidden flow from Secret (H) to Public (L)!
+   |
+92 |           print (f2 (MkF False))
+   |                  ^^^^^^^^^^^^^^
+
+Test.hs:95:18: warning:
     Collapsing: Forbidden flow from Secret (H) to Public (L)!
    |
-80 |           print (f2 (MkF False))
-   |                  ^^^^^^^^^^^^^^
-
-Test.hs:81:18: warning:
-    Ignoring: Forbidden flow from Secret (H) to Public (L)!
-   |
-81 |           print (f3 (MkF 0))
+95 |           print (f3 (MkF 0))
    |                  ^^^^^^^^^^
 
-Test.hs:83:18: warning:
+Test.hs:96:18: warning:
+    Ignoring: Forbidden flow from Secret (H) to Public (L)!
+   |
+96 |           print (f4 (MkF 0))
+   |                  ^^^^^^^^^^
+
+Test.hs:98:18: warning:
     Promoting: Automatic promotion of unlabeled value to a Secret value!
                Perhaps you intended to use 'box'?
    |
-83 |           print (True :: F H Bool)
+98 |           print (True :: F H Bool)
    |                  ^^^^
 
-Test.hs:84:18: warning:
+Test.hs:99:18: warning:
     Promoting: Automatic promotion of unlabeled value to a Public value!
                Perhaps you intended to use 'box'?
    |
-84 |           print (True :: F L Bool)
+99 |           print (True :: F L Bool)
    |                  ^^^^
 
-Test.hs:87:19: warning:
+Test.hs:102:19: warning:
     Promoting: Automatic promotion of unlabeled value to a Public value!
                Perhaps you intended to use 'box'?
-   |
-87 |           print ((1 :: Int) :: F L Age)
-   |                   ^^^^^^^^
+    |
+102 |           print ((1 :: Int) :: F L Age)
+    |                   ^^^^^^^^
 Linking /home/tritlo/kind-default-plugin/dist-newstyle/build/x86_64-linux/ghc-8.10.1/Test-1.0.0/x/test/build/test/test ...
 "hello"
 MkF {unF = True}
 MkF {unF = False}
+MkF {unF = 0}
 MkF {unF = 0}
 MkF {unF = True}
 MkF {unF = True}

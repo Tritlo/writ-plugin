@@ -7,7 +7,7 @@
 {-# LANGUAGE DeriveDataTypeable #-}
 module KindDefaults.Plugin (
       plugin,
-      Defaultable, Collapsible, Promoteable, Ignoreable
+      Defaultable, Collapsible, Promoteable, Ignoreable, Equivable
       ) where
 
 import GhcPlugins hiding (TcPlugin)
@@ -65,24 +65,30 @@ type family Ignoreable (k :: Constraint) :: ErrorMessage
 -- Collapsible means we are allowed to discharge (l1 :: k) ~ (l2 :: k)
 type family Collapsible k :: ErrorMessage
 
+-- Equivable is a more restricted version of collapsible, which means that we
+-- are allowed to discharge (a :: k) ~ (b :: k).
+type family Equivable k (a :: k) (b :: k):: ErrorMessage
 --------------------------------------------------------------------------------
 
 data Log = LogDefaultable Type RealSrcSpan
          | LogCollapsible Type RealSrcSpan
          | LogPromoteable Type RealSrcSpan
-         | LogIgnoreable  Type RealSrcSpan deriving (Data)
+         | LogIgnoreable  Type RealSrcSpan
+         | LogEquivable   Type RealSrcSpan deriving (Data)
 
 logSrc :: Log -> RealSrcSpan
 logSrc (LogDefaultable _ l) = l
 logSrc (LogCollapsible _ l) = l
 logSrc (LogPromoteable _ l) = l
 logSrc (LogIgnoreable  _ l) = l
+logSrc (LogEquivable   _ l) = l
 
 logTy :: Log -> Type
 logTy (LogDefaultable t _) = t
 logTy (LogCollapsible t _) = t
 logTy (LogPromoteable t _) = t
 logTy (LogIgnoreable  t _) = t
+logTy (LogEquivable   t _) = t
 
 -- Log prec determines in which order the warnings show up if  two show up in
 -- the same location. We want Defaultable to show up first, since it's often the
@@ -92,6 +98,7 @@ logPrec (LogDefaultable t _) = 1
 logPrec (LogCollapsible t _) = 2
 logPrec (LogPromoteable t _) = 3
 logPrec (LogIgnoreable  t _) = 4
+logPrec (LogEquivable   t _) = 5
 
 instance Ord Log where
   compare a b = case (compare `on` logSrc) a b of
@@ -108,6 +115,7 @@ instance Outputable Log where
    ppr (LogCollapsible ty _) = text "Collapsing:" <+> pprUserTypeErrorTy ty
    ppr (LogPromoteable ty _) = text "Promoting:"  <+> pprUserTypeErrorTy ty
    ppr (LogIgnoreable  ty _) = text "Ignoring:"   <+> pprUserTypeErrorTy ty
+   ppr (LogEquivable   ty _) = text "Equivaling:" <+> pprUserTypeErrorTy ty
 
 addWarning :: DynFlags -> Log -> IO()
 addWarning dflags log = warn (ppr log)
@@ -151,9 +159,10 @@ kindDefaultPlugin opts = TcPlugin initialize solve stop
                                                more ++ new_more,
                                                logs ++ new_logs)) }
         ; (unsolved, (solved, more, logs)) <-
-             foldM solveWFun (wanted, ([],[],[])) [ (solveIgnoreable, "Ignoring")
-                                                  , (solveDefaultable, "Defaulting")
+             foldM solveWFun (wanted, ([],[],[])) [ (solveDefaultable, "Defaulting")
+                                                  , (solveEquivable, "Equivaling")
                                                   , (solveCollapsible, "Collapsing")
+                                                  , (solveIgnoreable, "Ignoring")
                                                   , (solvePromoteable, "Promoting") ]
         ; tcPluginIO $ modifyIORef warns (logs ++) 
         ; return $ TcPluginOk solved more }
@@ -164,9 +173,10 @@ kindDefaultPlugin opts = TcPlugin initialize solve stop
                     mapM_ (addWarning dflags) . sort . nub }
 
 data PluginTyCons = PTC { defaultable :: TyCon
-                        , collapsible  :: TyCon
+                        , collapsible :: TyCon
                         , promoteable :: TyCon
-                        , ignoreable   :: TyCon }
+                        , ignoreable  :: TyCon
+                        , equivable   :: TyCon }
 
 getPluginTyCons :: TcPluginM PluginTyCons
 getPluginTyCons =
@@ -176,12 +186,14 @@ getPluginTyCons =
          Found _ mod  ->
              do defaultable <- getTyCon mod "Defaultable"
                 collapsible <- getTyCon mod "Collapsible"
+                equivable   <- getTyCon mod "Equivable"
                 promoteable <- getTyCon mod "Promoteable"
                 ignoreable  <- getTyCon mod "Ignoreable"
-                return $ PTC { defaultable = defaultable,
-                               collapsible = collapsible,
-                               promoteable = promoteable,
-                               ignoreable  = ignoreable }
+                return $ PTC { defaultable = defaultable
+                             , collapsible = collapsible
+                             , promoteable = promoteable
+                             , ignoreable  = ignoreable
+                             , equivable   = equivable }
          _ -> pprPanic "Plugin module not found!" empty
   where getTyCon mod name = lookupOrig mod (mkTcOcc name) >>= tcLookupTyCon
 
@@ -191,6 +203,7 @@ type Solution = Either Ct (Maybe (EvTerm, Ct), -- The solution to the Ct
                            [Log])              -- What we did
 
 
+-- Defaults any ambiguous type variables of kind k to l if Defaultable k = l
 solveDefaultable :: Mode -> FamInstEnvs -> PluginTyCons -> Ct -> TcPluginM Solution
 solveDefaultable NoDefer _ _ ct = return $ Left ct
 solveDefaultable Defer famInsts PTC{..} ct =
@@ -220,6 +233,7 @@ solveDefaultable Defer famInsts PTC{..} ct =
                                  LogDefaultable predTy (ctLocSpan $ ctLoc ct))
              _ -> return Nothing
 
+-- Solves con :: Constraint if Ignoreable con
 solveIgnoreable :: Mode -> FamInstEnvs -> PluginTyCons -> Ct -> TcPluginM Solution
 solveIgnoreable mode famInsts PTC{..} ct =
    case lookupFamInstEnv famInsts ignoreable [ctPred ct] of
@@ -233,6 +247,7 @@ solveIgnoreable mode famInsts PTC{..} ct =
                              [LogIgnoreable  (unwrapIfMsg def) (ctLocSpan $ ctLoc ct)])
    where (coercion, _) = normaliseType famInsts Phantom (ctPred ct)
 
+-- Solves (a :: k) ~ (b :: k) if Collapsible k
 solveCollapsible :: Mode -> FamInstEnvs -> PluginTyCons -> Ct -> TcPluginM Solution
 solveCollapsible mode famInsts PTC{..} ct =
    case splitTyConApp_maybe (ctPred ct) of 
@@ -249,7 +264,24 @@ solveCollapsible mode famInsts PTC{..} ct =
                                       [LogCollapsible (unwrapIfMsg def) (ctLocSpan $ ctLoc ct)])
       _ -> return $ Left ct
 
--- Solve promoteable turns a ~ B c into Coercible a (B c)
+-- Solves (a :: k) ~ (b :: k) if Equivable k a b
+solveEquivable :: Mode -> FamInstEnvs -> PluginTyCons -> Ct -> TcPluginM Solution
+solveEquivable mode famInsts PTC{..} ct =
+   case splitTyConApp_maybe (ctPred ct) of
+      Just (tyCon, [k1,k2,ty1,ty2]) | isEqPrimPred (ctPred ct)
+                                      && k1 `eqType` k2 ->
+            case lookupFamInstEnv famInsts equivable [k1, ty1, ty2] of
+               [] -> return $ Left ct
+               [FamInstMatch {fim_instance=FamInst{fi_rhs=def}}] ->
+                  do let new_ev = (ctEvidence ct) {ctev_pred = def}
+                     return $ Right (Just (evCoercion $ mkReflCo Phantom ty2, ct),
+                                     case mode of
+                                       Defer -> []
+                                       NoDefer -> [CNonCanonical {cc_ev=new_ev}],
+                                      [LogEquivable (unwrapIfMsg def) (ctLocSpan $ ctLoc ct)])
+      _ -> return $ Left ct
+
+-- Changes a ~ B c into Coercible a (B c) if Promoteable (B _)
 solvePromoteable :: Mode -> FamInstEnvs -> PluginTyCons -> Ct -> TcPluginM Solution
 solvePromoteable mode famInsts PTC{..} ct =
    case splitTyConApp_maybe (ctPred ct) of 

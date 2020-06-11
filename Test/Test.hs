@@ -18,7 +18,8 @@
 {-# LANGUAGE TypeApplications #-}
 module Main where
 
-import KindDefaults.Plugin (Defaultable, Promoteable, Collapsible, Ignoreable)
+import KindDefaults.Plugin (Defaultable, Promoteable, Collapsible,
+                            Ignoreable, Equivable)
 import GHC.TypeLits (TypeError(..),ErrorMessage(..))
 
 data Label = L | H deriving (Show)
@@ -31,6 +32,13 @@ type instance Defaultable Label = L
 -- By giving the kind Label a Collapsible instance, we allow L ~ H and H ~ L,
 -- but you have to give the user an explanation in the error message.
 type instance Collapsible Label =
+    TypeError (Text "Forbidden flow from Secret (H) to Public (L)!")
+
+-- You can also give the kind the more limited Equivable instance, which only
+-- allows equiality between two of the types, in one direction. I.e. this would
+-- allow L ~ H, but not H ~ L. Useful for when you only want some members of a
+-- kind to be equivalent, but not others.
+type instance Equivable Label L H =
     TypeError (Text "Forbidden flow from Secret (H) to Public (L)!")
 
 -- Giving the constraint (Less H L) an ignoreable instance simply means that
@@ -67,8 +75,12 @@ f = MkF . unF
 f2 :: Max l1 l2 ~ H => F l1 a -> F l2 a
 f2 = MkF . unF
 
-f3 :: Less H L => F a b -> F a b
+f3 :: H ~ L => F l1 a -> F l2 a
 f3 = MkF . unF
+
+f4 :: Less H L => F a b -> F a b
+f4 = MkF . unF
+
 
 main :: IO ()
 main = do print "hello"
@@ -76,9 +88,12 @@ main = do print "hello"
           -- Less H L by ignoring it.
           print (f (MkF True))
           -- By defaulting l1 and l2 to L, Max l1 l2 becomes L
-          -- we then solve this by collapsing L ~ H.
+          -- we then solve this by equivaling L ~ H.
           print (f2 (MkF False))
+          -- Here we're asked to solve H ~ L, which we can do by collapsing
+          -- Label.
           print (f3 (MkF 0))
+          print (f4 (MkF 0))
           -- We can promote automatically, ignoring the labels.
           print (True :: F H Bool)
           print (True :: F L Bool)
