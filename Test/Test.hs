@@ -23,15 +23,26 @@ import GHC.TypeLits (TypeError(..),ErrorMessage(..))
 
 data Label = L | H deriving (Show)
 
+-- By giving the kind Label a Defaultable instance, any ambiguous type variables
+-- oft the kind Label will be defaulted to L
 type instance Defaultable Label = L
 
+
+-- By giving the kind Label a Collapsible instance, we allow L ~ H and H ~ L,
+-- but you have to give the user an explanation in the error message.
 type instance Collapsible Label =
     TypeError (Text "Forbidden flow from Secret (H) to Public (L)!")
+
+-- Giving the constraint (Less H L) an ignoreable instance simply means that
+-- whenever a (Less H L) constraint can't be solved, that is ignored.
 type instance Ignoreable (Less H L) =
     TypeError (Text "Forbidden flow from Secret (H) to Public (L)!")
 
 newtype F (l :: Label) a = MkF {unF :: a} deriving (Show)
 
+-- Promotable (F H _) will change any (a ~ F H b) into Coercible a (F H b), but
+-- only when the label is H. Can also be written as (F _ _), if it should apply
+-- to all labels.
 type instance Promoteable (F H _) =
      TypeError (Text "Automatic promotion of unlabeled value to a Secret value!"
                 :$$: Text "Perhaps you intended to use 'box'?")
