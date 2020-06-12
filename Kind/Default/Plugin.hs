@@ -24,7 +24,7 @@ import FamInstEnv
 import TysPrim (equalityTyCon)
 import PrelNames (eqPrimTyConKey)
 import Predicate (EqRel(NomEq), isEqPrimPred)
-
+import TyCoRep (UnivCoProvenance(..))
 import Data.Kind (Constraint)
 import Data.Data (Data, toConstr)
 
@@ -224,7 +224,7 @@ solveRelate mode famInsts PTC{..} ct =
                   do let new_rhs = substTyWith fi_tvs fim_tys fi_rhs
                          new_ev = (ctEvidence ct) {ctev_pred = new_rhs}
                      report <- newReport ptc_report (Log new_rhs (ctLoc ct))
-                     return $ Right ( Just (evCoercion $ mkReflCo Phantom ty2, ct)
+                     return $ Right ( Just (mkProof "Relateable" Nominal ty1 ty2, ct)
                                     , case mode of
                                         Defer -> [report]
                                         NoDefer -> [CNonCanonical {cc_ev =new_ev}]
@@ -246,7 +246,7 @@ solvePromote mode famInsts PTC{..} ct =
                              NoDefer -> new_rhs
                     new_ev = (ctEvidence ct) {ctev_pred = pty}
                 report <- newReport ptc_report (Log new_rhs (ctLoc ct))
-                return $ Right ( Just (evCoercion $ mkReflCo Representational ty2, ct)
+                return $ Right ( Just (mkProof "Promoteable" Representational ty1 ty2, ct)
                                , case mode of
                                    Defer -> [report, CNonCanonical {cc_ev=new_ev}]
                                    NoDefer -> [CNonCanonical {cc_ev=new_ev}]
@@ -261,7 +261,7 @@ solveReport :: Mode -> FamInstEnvs -> PluginTyCons -> Ct -> TcPluginM Solution
 solveReport _ _ PTC{..} ct = return $
    case splitTyConApp_maybe (ctPred ct) of
       Just r@(tyCon, [msg]) | getName tyCon == (getName ptc_report) ->
-             Right (Just (evCoercion $ mkReflCo Phantom msg, ct),
+             Right (Just (mkProof "Reportable" Phantom (ctPred ct) msg, ct),
                    [], [Log msg (ctLoc ct)])
       _ -> Left ct
 
@@ -271,6 +271,8 @@ newReport ptc_report (Log msg loc) =
        return $ setCtLoc CNonCanonical{cc_ev=ev} loc
 
 -- Utils
+mkProof :: String -> Role -> Type -> Type -> EvTerm
+mkProof str role ty1 ty2 = evCoercion $ mkUnivCo (PluginProv str) role ty1 ty2
 
 inspectSol :: [Either a (Maybe b, [c], [d])] -> ([a], ([b], [c], [d]))
 inspectSol xs = (ls, (catMaybes sols, concat more, concat logs))
