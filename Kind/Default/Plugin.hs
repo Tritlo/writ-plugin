@@ -1,16 +1,10 @@
 -- Copyright (c) 2020 Matthías Páll Gissurarson
-{-# LANGUAGE DataKinds #-}
-{-# LANGUAGE PolyKinds #-}
-{-# LANGUAGE ConstraintKinds #-}
 {-# LANGUAGE TypeFamilies #-}
+{-# LANGUAGE DataKinds #-}
 {-# LANGUAGE RecordWildCards #-}
-{-# LANGUAGE DeriveDataTypeable #-}
-{-# LANGUAGE QuantifiedConstraints #-}
-module KindDefaults.Plugin (
-      plugin,
-      Default, Promote, Ignore, Relate,
-      ) where
+module Kind.Default.Plugin ( plugin, module Kind.Default) where
 
+import Kind.Default
 import GhcPlugins hiding (TcPlugin)
 import TcRnTypes
 import TcPluginM
@@ -26,9 +20,6 @@ import Data.List (nub, sort)
 import Data.Function (on)
 
 import FamInstEnv
-import Finder (findPluginModule)
-import LoadIface (loadPluginInterface)
-import TcRnMonad (initIfaceTcRn)
 
 import TysPrim (equalityTyCon)
 import PrelNames (eqPrimTyConKey)
@@ -38,9 +29,7 @@ import Data.Kind (Constraint)
 import Data.Data (Data, toConstr)
 
 import GHC.TypeLits(TypeError(..), ErrorMessage(..))
-
-thisModName :: ModuleName
-thisModName = mkModuleName "KindDefaults.Plugin"
+import GHC.Hs
 
 --------------------------------------------------------------------------------
 -- Exported
@@ -49,24 +38,7 @@ plugin :: Plugin
 plugin = defaultPlugin { tcPlugin = Just . kindDefaultPlugin
                        , pluginRecompile = purePlugin }
 
-
--- Default means that if we have an ambiguous l1 of kind k, we can default it to
--- be the rhs, i.e. type family Default Label = L would default all
--- ambiguous type variables of kind Label to L
-type family Default k :: k
-
--- Promote means that if we have a value (True :: Bool), we can promote it to (k Bool)
--- Note that Promote a k requires Coercible a k, otherwise a Coercible error  will be produced.
-type family Promote (a :: *) (k :: *) :: ErrorMessage
-
--- An Ignore cons means that we are allowd to ignore the constraint con.
--- Note! This only works for empty classes!
-type family Ignore (k :: Constraint) :: ErrorMessage
-
--- Relate means that we are allowed to discharge (a :: k) ~ (b :: k) and (b :: k) ~ (a :: k).
-type family Relate k (a :: k) (b :: k):: ErrorMessage
---------------------------------------------------------------------------------
-
+-------------------------------------------------------------------------------
 data Log = Log Type CtLoc
 
 logSrc :: Log -> RealSrcSpan
@@ -167,8 +139,7 @@ data PluginTyCons = PTC { ptc_default :: TyCon
 
 getPluginTyCons :: TcPluginM PluginTyCons
 getPluginTyCons =
-   do env <- getTopEnv
-      fpmRes <- findImportedModule thisModName (Just $ mkFastString "kind-default-plugin")
+   do fpmRes <- findImportedModule (mkModuleName "Kind.Default") Nothing
       case fpmRes of
          Found _ mod  ->
              do ptc_default <- getTyCon mod "Default"
@@ -181,7 +152,9 @@ getPluginTyCons =
                              , ptc_ignore  = ptc_ignore
                              , ptc_relate  = ptc_relate
                              , ptc_report = ptc_report }
-         _ -> pprPanic "Plugin module not found!" empty
+         NoPackage uid -> pprPanic "Plugin module not found (no package)!" (ppr uid)
+         FoundMultiple ms -> pprPanic "Multiple plugin modules found!" (ppr ms)
+         NotFound{..} -> pprPanic "Plugin module not found!" empty
   where getTyCon mod name = lookupOrig mod (mkTcOcc name) >>= tcLookupTyCon
 
 
@@ -281,10 +254,6 @@ solvePromote mode famInsts PTC{..} ct =
       _ -> return $ Left ct
   where eqRep = equalityTyCon Representational
 
--- Report is a type family we use to wrap TypeErrors so that any type families
--- within can be computed. It's closed, so we know that the only instances of
--- Report will be the ones we generated.
-type family Report (err :: ErrorMessage) :: Constraint where
 
 -- Solve Report is our way of computing whatever type familes that might be in
 -- a given type error before emitting it as a warning.

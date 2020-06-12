@@ -1,6 +1,5 @@
-{-# OPTIONS_GHC -fplugin KindDefaults.Plugin
-                -fplugin-opt=KindDefaults.Plugin:debug
-                -fplugin-opt=KindDefaults.Plugin:defer
+{-# OPTIONS_GHC -fplugin Kind.Default.Plugin
+                -fplugin-opt=Kind.Default.Plugin:defer
                  #-}
 -- Plugin:
 {-# LANGUAGE DataKinds #-}
@@ -18,7 +17,8 @@
 {-# LANGUAGE TypeApplications #-}
 module Main where
 
-import KindDefaults.Plugin (Default, Promote, Ignore, Relate)
+
+import Kind.Default (Default, Promote, Ignore, Relate)
 import GHC.TypeLits (TypeError(..),ErrorMessage(..))
 
 data Label = L | H deriving (Show)
