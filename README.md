@@ -5,8 +5,13 @@ Somewhat Automatic Coercion of Representationally Equivalent Domains
 
 A type-checker plugin that allows users to "defaulting" a data kind to a value,
 whenever that variable is ambiguous. Also allows automatic promotion to
-representationally equal types, as well as ignoring certain constraints.
-All parametrized by type families.
+representationally equal types, as well as ignoring certain constraints, all
+parametrized by type families. By default these only improve the error messages
+that GHC generates. However, when the `defer` flag is set, any such errors are
+converted into warnings, and if integrated with something likeghcide, you can
+even see the generated warnings inline in your editor:
+
+![A display of SACRED running with GHCIDE](images/ghcide.png]
 
 Example:
 
@@ -56,19 +61,24 @@ type instance Ignore (Less n m) =
     TypeError (Text "Forbidden flow from " :<>: LabelPpr (Max n m)
               :<>: Text " to " :<>: LabelPpr (Min n m) :<>: Text "!")
 
-newtype F (l :: Label) a = MkF {unF :: a} deriving (Show)
-
 -- Promotable (F H _) will change any (a ~ F H b) into Coercible a (F H b), but
 -- only when the label is H. Can also be written as (F _ _), if it should apply
 -- to all labels.
 type instance Promote a (F H b) =
      TypeError (Text "Automatic promotion of unlabeled '"
-                :<>: ShowType a :<>: Text "' to a Secret '" :<>: ShowType b :<>: Text "'!"
+                :<>: ShowType a :<>: Text "' to a Secret '"
+                :<>: ShowType b :<>: Text "'!"
                 :$$: Text "Perhaps you intended to use 'box'?")
 type instance Promote a (F L b) =
      TypeError (Text "Automatic promotion of unlabeled '"
-                :<>: ShowType a :<>: Text "' to a Public '" :<>: ShowType b :<>: Text "'!"
+                :<>: ShowType a :<>: Text "' to a Public '"
+                :<>: ShowType b :<>: Text "'!"
                 :$$: Text "Perhaps you intended to use 'box'?")
+
+newtype F (l :: Label) a = MkF {unF :: a} deriving (Show)
+
+box :: a -> F l a
+box = MkF
 
 class Less (l :: Label) (l' :: Label) where
 instance Less L H where

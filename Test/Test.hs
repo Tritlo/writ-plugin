@@ -43,19 +43,23 @@ type instance Ignore (Less n m) =
     TypeError (Text "Forbidden flow from " :<>: LabelPpr (Max n m)
               :<>: Text " to " :<>: LabelPpr (Min n m) :<>: Text "!")
 
-newtype F (l :: Label) a = MkF {unF :: a} deriving (Show)
-
 -- Promotable (F H _) will change any (a ~ F H b) into Coercible a (F H b), but
 -- only when the label is H. Can also be written as (F _ _), if it should apply
 -- to all labels.
 type instance Promote a (F H b) =
      TypeError (Text "Automatic promotion of unlabeled '"
-                :<>: ShowType a :<>: Text "' to a Secret '" :<>: ShowType b :<>: Text "'!"
+                :<>: ShowType a :<>: Text "' to a Secret '"
+                :<>: ShowType b :<>: Text "'!"
                 :$$: Text "Perhaps you intended to use 'box'?")
 type instance Promote a (F L b) =
      TypeError (Text "Automatic promotion of unlabeled '"
                 :<>: ShowType a :<>: Text "' to a Public '" :<>: ShowType b :<>: Text "'!"
                 :$$: Text "Perhaps you intended to use 'box'?")
+
+newtype F (l :: Label) a = MkF {unF :: a} deriving (Show)
+
+box :: a -> F l a
+box = MkF
 
 class Less (l :: Label) (l' :: Label) where
 instance Less L H where
