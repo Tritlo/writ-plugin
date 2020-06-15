@@ -38,6 +38,8 @@ type instance Relate Label (n :: Label) (m :: Label) =
     TypeError (Text "Forbidden flow from " :<>: LabelPpr (Max n m)
                :<>: Text " to " :<>: LabelPpr (Min n m) :<>: Text "!")
 
+
+
 type family LabelPpr (k :: Label) where
     LabelPpr L = Text "Public (L)"
     LabelPpr H = Text "Secret (H)"
@@ -97,7 +99,7 @@ main :: IO ()
 main = do --print "hello"
           -- We can solve (Less H a) by defaulting a ~ L, and then solving
           -- Less H L by ignoring it.
-          -- print (f (MkF True))
+          print (f (MkF True))
           -- print (fa (MkF True))
           -- By defaulting l1 and l2 to L, Max l1 l2 becomes L
           -- we then solve this by equivaling L ~ H.
@@ -105,10 +107,10 @@ main = do --print "hello"
           -- Here we're asked to solve H ~ L, which we can do by collapsing
           -- Label.
           -- print (f3 (MkF 0))
-          --print (f4 (MkF 0))
+          -- print (f4 (MkF 0))
           -- We can promote automatically, ignoring the labels.
-          print (True :: F H Bool)
+          -- print (True :: F H Bool)
           -- print (True :: F L Bool)
-          -- -- Not that we are turning this into a coercion, so that if
-          -- -- Int is coercible to Age, the promotion works.
+          -- Not that we are turning this into a coercion, so that if
+          -- Int is coercible to Age, the promotion works.
           -- print ((1 :: Int) :: F L Age)

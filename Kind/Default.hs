@@ -25,7 +25,7 @@ type family Ignore (k :: Constraint) :: ErrorMessage
 -- Relate means that we are allowed to discharge (a :: k) ~ (b :: k) and (b :: k) ~ (a :: k).
 type family Relate k (a :: k) (b :: k):: ErrorMessage
 
--- Report is a type family we use to wrap TypeErrors so that any type families
+-- Report is a class we use to wrap TypeErrors so that any type families
 -- within can be computed. It's closed, so we know that the only instances of
 -- Report will be the ones we generated.
-type family Report (err :: ErrorMessage) :: Constraint where
+class Report (err :: ErrorMessage) where
