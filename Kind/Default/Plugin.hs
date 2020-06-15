@@ -79,9 +79,7 @@ plugin = defaultPlugin { tcPlugin = Just . kindDefaultPlugin
 -------------------------------------------------------------------------------
 data Log = Log { log_pred_ty :: Type, log_loc :: CtLoc}
          | LogDefault { log_pred_ty :: Type, log_loc :: CtLoc,
-                        log_var :: Var, log_kind :: Kind,
-                        log_res :: Type,
-                        log_ct_flav :: CtFlavour}
+                        log_var :: Var, log_kind :: Kind, log_res :: Type }
 
 logSrc :: Log -> RealSrcSpan
 logSrc = ctLocSpan . log_loc
@@ -100,15 +98,14 @@ instance Eq Log where
        ((==) `on` logSrc) a b && (eqType `on` log_pred_ty) a b
                               && ((==) `on` log_var) a b
 
+
 instance Outputable Log where
    -- We do some extra work to pretty print the Defaulting messages
    ppr Log{..} =
         case userTypeError_maybe log_pred_ty of
            Just msg -> pprUserTypeErrorTy msg
            _ -> text "SACRED" <+> ppr log_pred_ty
-   ppr LogDefault{..} = (case log_ct_flav of
-                              Given -> text "Will default"
-                              _ -> text "Defaulting")
+   ppr LogDefault{..} = text "Defaulting"
                         -- We want to print a instead of a0
                         <+> quotes (ppr (mkTyVarTy log_var) <+> dcolon <+> ppr log_kind)
                         <+> text "to"
@@ -117,6 +114,8 @@ instance Outputable Log where
                         <+> text "in"
                         <+> quotes (ppr log_pred_ty)
                         <> text "!"
+      where printFlav Given = "Will default"
+            printFlav _ = "Defaulting"
 
 addWarning :: DynFlags -> Log -> IO()
 addWarning dflags log = warn (ppr log)
@@ -162,11 +161,9 @@ kindDefaultPlugin opts = TcPlugin initialize solve stop
                     ; return (still_unsolved, (solved ++ new_solved,
                                                more ++ new_more,
                                                logs ++ new_logs)) }
-        ; let order = [ (solveReport,  "Reporting")
-                      , (solveDefault, "Defaulting")
-                      , (solveRelate,  "Relating")
-                      , (solveIgnore,  "Ignoring")
-                      , (solvePromote, "Promoting")]
+        ; let order = [(solveReport,  "Reporting"), (solveDefault, "Defaulting")
+                      ,(solveRelate,  "Relating"),  (solveIgnore,  "Ignoring")
+                      ,(solvePromote, "Promoting")]
         ; (_, (solved_wanteds, more_cts, logs)) <-
              foldM solveWFun (wanted, ([],[],[])) order
         ; tcPluginIO $ modifyIORef warns (logs ++)
@@ -191,11 +188,7 @@ getPluginTyCons =
                 ptc_promote <- getTyCon mod "Promote"
                 ptc_ignore  <- getTyCon mod "Ignore"
                 ptc_report  <- getTyCon mod "Report"
-                return $ PTC { ptc_default = ptc_default
-                             , ptc_promote = ptc_promote
-                             , ptc_ignore  = ptc_ignore
-                             , ptc_relate  = ptc_relate
-                             , ptc_report = ptc_report }
+                return PTC{..}
          NoPackage uid -> pprPanic "Plugin module not found (no package)!" (ppr uid)
          FoundMultiple ms -> pprPanic "Multiple plugin modules found!" (ppr ms)
          NotFound{..} -> pprPanic "Plugin module not found!" empty
@@ -210,61 +203,39 @@ type Solution = Either Ct (Maybe (EvTerm, Ct), -- The solution to the Ct
 
 -- Defaults any ambiguous type variables of kind k to l if Default k = l
 solveDefault :: Mode -> FamInstEnvs -> PluginTyCons -> Ct -> TcPluginM Solution
-solveDefault _ famInsts PTC{..} ct | not (isCTyEqCan ct) =
-   do (vars, defs) <- unzip . catMaybes <$> mapM getDefault (tyCoVarsOfCtList ct)
-      if null vars
-      then return $ Left ct
-      else do let new_pred = substTyWith vars defs (ctPred ct)
-                  new_co = mkUnivCo (PluginProv "sacred-defaulted") Nominal (ctPred ct) new_pred
-                  predTy = mkPrimEqPredRole Nominal (ctPred ct) new_pred
-              -- See [Note core-lint]
-              (derived, logs) <- unzip <$> zipWithM mkTyEq vars defs
-              return $ Right (Nothing,
-                              map (flip setCtLoc loc . CNonCanonical) derived,
-                              logs
-                              )
-   where tyVars = tyCoVarsOfCtList ct
+solveDefault _ famInsts PTC{..} ct | null defaults = return $ Left ct
+                                   | otherwise =
+      -- We make assertions that a ~ def for all free a in pred_ty of ct.
+      do assert_eqs <- mapM (mkAssert (ctLoc ct)) eq_tys
+         return $ Right (Nothing, assert_eqs, logs)
+   where defaults = mapMaybe getDefault (tyCoVarsOfCtList ct)
+         (eq_tys, logs) = unzip $ map mkTyEq defaults
          getDefault var =
            case lookupFamInstEnv famInsts ptc_default [varType var] of
-             [FamInstMatch {fim_instance=FamInst{..}, ..}] ->
-               do let rhs = fi_rhs
-                      varTy = mkTyVarTy var
-                      predTy = mkPrimEqPredRole Nominal varTy rhs
-                  return (Just (var, rhs))
-             _ -> return Nothing
-         loc = ctLoc ct -- TODO: Should we bumpCtLocDepth here?
-         mkTyEq var def = do let co = mkUnivCo (PluginProv "sacred-defaulted") Nominal
-                                        (mkTyVarTy var) def
-                                 predTy = mkPrimEqPredRole Nominal (mkTyVarTy var) def
-                             nd <- newDerived loc predTy
-                             return (nd, LogDefault{log_pred_ty = ctPred ct,
-                                                    log_ct_flav = ctFlavour ct,
-                                                    log_var = var,
-                                                    log_kind = varType var,
-                                                    log_res = def,
-                                                    log_loc=loc} )
-
-solveDefault _ _ _ ct = return $ Left ct
+             [FamInstMatch{fim_instance=FamInst{..}}] -> Just (var, fi_rhs)
+             _ -> Nothing
+         mkTyEq (var,def) = (mkPrimEqPredRole Nominal (mkTyVarTy var) def,
+                             LogDefault{log_pred_ty = ctPred ct,
+                                        log_var = var, log_kind = varType var,
+                                        log_res = def, log_loc =ctLoc ct})
 
 -- Solves con :: Constraint if Ignore con
 solveIgnore :: Mode -> FamInstEnvs -> PluginTyCons -> Ct -> TcPluginM Solution
-solveIgnore mode famInsts PTC{..} ct@CDictCan{cc_ev=cc_ev,
-                                              cc_class=cls,
-                                              cc_tyargs=tys,
-                                              cc_pend_sc=psc} =
+solveIgnore mode famInsts PTC{..} ct@CDictCan{cc_ev=cc_ev, cc_class=cls,
+                                              cc_tyargs=cls_tys} =
    case lookupFamInstEnv famInsts ptc_ignore [ctPred ct] of
       [] -> return $ Left ct
       _ | not (null $ classMethods cls) -> return $ Left ct -- We only do empty classes
-      [FamInstMatch {fim_instance=fi@FamInst{fi_tys=fi_tys@(ignored:_),..}, ..}] ->
+      [FamInstMatch {fim_instance=FamInst{..},..}] ->
             do let new_rhs = substTyWith fi_tvs fim_tys fi_rhs
-                   new_ev = cc_ev {ctev_pred = new_rhs}
+                   ty_err = CNonCanonical cc_ev{ctev_pred = new_rhs}
+                   classCon = tyConSingleDataCon (classTyCon cls)
                report <- newReport ptc_report (Log new_rhs (ctLoc ct))
-               let cCon = tyConSingleDataCon (classTyCon cls)
-               return $ Right (Just (evDataConApp cCon tys [], ct),
-                               case mode of
-                                 Defer -> [report]
-                                 NoDefer -> [CNonCanonical {cc_ev=new_ev}],
-                               [])
+               return $ Right ( Just (evDataConApp classCon cls_tys [], ct)
+                              ,  case mode of
+                                   Defer -> [report]
+                                   NoDefer -> [ty_err]
+                              , [])
 solveIgnore _ _ _ ct = return $ Left ct
 
 
@@ -274,18 +245,18 @@ solveRelate mode famInsts PTC{..} ct =
    case splitTyConApp_maybe (ctPred ct) of
       Just (tyCon, [k1,k2,ty1,ty2]) | isEqPrimPred (ctPred ct)
                                       && k1 `eqType` k2 ->
-            case  lookupFamInstEnv famInsts ptc_relate [k1, ty1, ty2]
-               ++ lookupFamInstEnv famInsts ptc_relate [k1, ty2, ty1] of
-               [] -> return $ Left ct
-               (FamInstMatch {fim_instance=FamInst{..}, ..}:_) ->
-                  do let new_rhs = substTyWith fi_tvs fim_tys fi_rhs
-                         new_ev = (ctEvidence ct) {ctev_pred = new_rhs}
-                     report <- newReport ptc_report (Log new_rhs (ctLoc ct))
-                     return $ Right ( Just (mkProof "sacred-relateable" Nominal ty1 ty2, ct)
-                                    , case mode of
-                                        Defer -> [report]
-                                        NoDefer -> [CNonCanonical {cc_ev =new_ev}]
-                                    , [])
+        case lookupFamInstEnv famInsts ptc_relate [k1, ty1, ty2]
+          ++ lookupFamInstEnv famInsts ptc_relate [k1, ty2, ty1] of
+           [] -> return $ Left ct
+           (FamInstMatch {fim_instance=FamInst{..}, ..}:_) ->
+             do let new_rhs = substTyWith fi_tvs fim_tys fi_rhs
+                    ty_err = CNonCanonical (ctEvidence ct) {ctev_pred = new_rhs}
+                report <- newReport ptc_report (Log new_rhs (ctLoc ct))
+                return $ Right (Just (mkProof "sacred-relateable" Nominal ty1 ty2, ct),
+                                case mode of
+                                  Defer -> [report]
+                                  NoDefer -> [ty_err],
+                                [])
       _ -> return $ Left ct
 
 -- Changes a ~ B c into Coercible a (B c) if Promote (B _)
@@ -298,18 +269,17 @@ solvePromote mode famInsts PTC{..} ct =
            [] -> return $ Left ct
            [FamInstMatch {fim_instance=FamInst{..}, ..}] ->
              do let new_rhs = substTyWith fi_tvs fim_tys fi_rhs
-                    pty = case mode of
-                             Defer -> mkTyConApp eqRep args
-                             NoDefer -> new_rhs
-                    new_ev = (ctEvidence ct) {ctev_pred = pty}
+                    eq_ty = mkPrimEqPredRole Representational ty1 ty2
+                    ty_err  = CNonCanonical (ctEvidence ct){ctev_pred = new_rhs}
+                check_coerce <- mkAssert (ctLoc ct) eq_ty
                 report <- newReport ptc_report (Log new_rhs (ctLoc ct))
-                return $ Right ( Just (mkProof "sacred-promoteable" Representational ty1 ty2, ct)
-                               , case mode of
-                                   Defer -> [report, CNonCanonical {cc_ev=new_ev}]
-                                   NoDefer -> [CNonCanonical {cc_ev=new_ev}]
-                               , [])
+                return $ Right (Just (mkProof "sacred-promoteable" Nominal ty1 ty2, ct),
+                                case mode of
+                                  Defer -> [report, check_coerce]
+                                  NoDefer -> [ty_err],
+                                [])
       _ -> return $ Left ct
-  where eqRep = equalityTyCon Representational
+
 
 
 -- Solve Report is our way of computing whatever type familes that might be in
@@ -318,17 +288,19 @@ solveReport :: Mode -> FamInstEnvs -> PluginTyCons -> Ct -> TcPluginM Solution
 solveReport _ _ PTC{..} ct = return $
    case splitTyConApp_maybe (ctPred ct) of
       Just r@(tyCon, [msg]) | getName tyCon == getName ptc_report ->
-             let cCon = tyConSingleDataCon tyCon
-             in Right (Just (evDataConApp cCon [msg] [], ct),
-                   [], [Log msg (ctLoc ct)])
+        Right (Just (evDataConApp (tyConSingleDataCon tyCon) [msg] [], ct),
+               [], [Log msg (ctLoc ct)])
       _ -> Left ct
+
+-- Utils
+mkAssert :: CtLoc -> PredType -> TcPluginM Ct
+mkAssert loc eq_ty = flip setCtLoc loc . CNonCanonical <$> newDerived loc eq_ty
 
 newReport :: TyCon -> Log -> TcPluginM Ct
 newReport ptc_report Log{..} =
     do ev <- newWanted log_loc (mkTyConApp ptc_report [log_pred_ty])
        return $ setCtLoc CNonCanonical{cc_ev=ev} log_loc
 
--- Utils
 mkProof :: String -> Role -> Type -> Type -> EvTerm
 mkProof str role ty1 ty2 = evCoercion $ mkUnivCo (PluginProv str) role ty1 ty2
 

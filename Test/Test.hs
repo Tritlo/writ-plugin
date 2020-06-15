@@ -1,6 +1,6 @@
 {-# OPTIONS_GHC -fplugin Kind.Default.Plugin
-                -fplugin-opt=Kind.Default.Plugin:defer
                 -fplugin-opt=Kind.Default.Plugin:debug
+                -fplugin-opt=Kind.Default.Plugin:defer
                 -dcore-lint
                  #-}
 -- Plugin:
@@ -32,8 +32,6 @@ type instance Default Label = L
 type instance Relate Label (n :: Label) (m :: Label) =
     TypeError (Text "Forbidden flow from " :<>: LabelPpr (Max n m)
                :<>: Text " to " :<>: LabelPpr (Min n m) :<>: Text "!")
-
-
 
 type family LabelPpr (k :: Label) where
     LabelPpr L = Text "Public (L)"
@@ -104,8 +102,8 @@ main = do print "hello!"
           print (f3 (MkF 0))
           print (f4 (MkF 0))
           -- We can promote automatically, ignoring the labels.
-          -- print (True :: F H Bool)
-          -- print (True :: F L Bool)
+          print (True :: F H Bool)
+          print (True :: F L Bool)
           -- Not that we are turning this into a coercion, so that if
           -- Int is coercible to Age, the promotion works.
-          -- print ((1 :: Int) :: F L Age)
+          print ((1 :: Int) :: F L Age)
