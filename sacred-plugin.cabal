@@ -1,4 +1,4 @@
-name: kind-default-plugin
+name: sacred-plugin
 cabal-version: >= 1.24
 build-type: Simple
 version: 1.0.0
@@ -11,8 +11,8 @@ library
   build-depends: base >= 4 && < 5,
                  ghc >= 8 && < 9
   exposed-modules:
-    Kind.Default.Plugin,
-    Kind.Default
+    SACRED.Plugin,
+    SACRED.Configure
 
 Source-repository head
   Type:     git

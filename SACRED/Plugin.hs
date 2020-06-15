@@ -3,9 +3,9 @@
 {-# LANGUAGE DataKinds #-}
 {-# LANGUAGE RecordWildCards #-}
 {-# LANGUAGE CPP #-}
-module Kind.Default.Plugin ( plugin, module Kind.Default) where
+module SACRED.Plugin ( plugin, module SACRED.Configure ) where
 
-import Kind.Default
+import SACRED.Configure
 
 import Control.Monad (when, guard, foldM, zipWithM)
 import Data.Maybe (mapMaybe, catMaybes, fromMaybe, fromJust)
@@ -193,7 +193,7 @@ data PluginTyCons = PTC { ptc_default :: TyCon
 
 getPluginTyCons :: TcPluginM PluginTyCons
 getPluginTyCons =
-   do fpmRes <- findImportedModule (mkModuleName "Kind.Default") Nothing
+   do fpmRes <- findImportedModule (mkModuleName "SACRED.Configure") Nothing
       case fpmRes of
          Found _ mod  ->
              do ptc_default <- getTyCon mod "Default"

@@ -1,6 +1,6 @@
-{-# OPTIONS_GHC -fplugin Kind.Default.Plugin
-                -fplugin-opt=Kind.Default.Plugin:debug
-                -fplugin-opt=Kind.Default.Plugin:defer
+{-# OPTIONS_GHC -fplugin SACRED.Plugin
+                -fplugin-opt=SACRED.Plugin:debug
+                -fplugin-opt=SACRED.Plugin:defer
                 -dcore-lint
                  #-}
 -- Plugin:
@@ -16,7 +16,7 @@
 module Main (main) where
 
 
-import Kind.Default (Default, Promote, Ignore, Relate)
+import SACRED.Configure (Default, Promote, Ignore, Relate)
 import GHC.TypeLits (TypeError(..),ErrorMessage(..))
 
 data Label = L | H deriving (Show)

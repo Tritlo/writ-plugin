@@ -2,7 +2,7 @@
 {-# LANGUAGE PolyKinds #-}
 {-# LANGUAGE ConstraintKinds #-}
 {-# LANGUAGE TypeFamilies #-}
-module Kind.Default where
+module SACRED.Configure where
 
 import GHC.TypeLits (ErrorMessage)
 import Data.Kind (Constraint)
