@@ -86,8 +86,8 @@ f = MkF . unF
 -- f2 :: Max l1 l2 ~ H => F l1 a -> F l2 a
 -- f2 = MkF . unF
 
-f3 :: H ~ L => F l1 a -> F l2 a
-f3 = MkF . unF
+-- f3 :: (L ~ L, H ~ L) => F l1 a -> F l2 a
+-- f3 = MkF . unF
 
 -- f4 :: Less H L => F a b -> F a b
 -- f4 = MkF . unF
@@ -104,10 +104,10 @@ main = do --print "hello"
           -- print (f2 (MkF False))
           -- Here we're asked to solve H ~ L, which we can do by collapsing
           -- Label.
-          print (f3 (MkF 0))
+          -- print (f3 (MkF 0))
           --print (f4 (MkF 0))
           -- We can promote automatically, ignoring the labels.
-          -- print (True :: F H Bool)
+          print (True :: F H Bool)
           -- print (True :: F L Bool)
           -- -- Not that we are turning this into a coercion, so that if
           -- -- Int is coercible to Age, the promotion works.

@@ -54,10 +54,6 @@ logSrc (Log _ _ l) = ctLocSpan l
 logTy :: Log -> Type
 logTy (Log t _ _) = t
 
--- Log prec determines in which order the warnings show up if  two show up in
--- the same location. We want Default to show up first, since it's often the
--- case that the others are a result of having defaulted a type variable.
-
 instance Ord Log where
   compare = compare `on` logSrc
 
@@ -134,7 +130,11 @@ kindDefaultPlugin opts = TcPlugin initialize solve stop
 
         ; (_, (_, more_givens, given_logs)) <-
              foldM solveWFun (given, ([],[],[])) [(solveWarnDefault, "Defaulting")]
-
+        -- NOTE: core-lint is not very good with weird equalities. Notably,
+        -- it lints acoercion, and then tries to remake it using
+        -- "mkHeteroCoercionType", which is not the right thing to do. I belive
+        -- it has been fixed in 8.12, at least "mkHetreoCoercionType" isn't
+        -- used anywhere for linting.
         ; (_, (solved_wanteds, more_cts, logs)) <-
              foldM solveWFun (wanted, ([],more_givens,given_logs)) [ (solveReport, "Reporting")
                                                                    , (solveDefault, "Defaulting")
@@ -189,6 +189,8 @@ solveDefault _ famInsts PTC{..} ct | not (isCTyEqCan ct) =
       else do let new_pred = substTyWith vars defs (ctPred ct)
                   new_co = mkUnivCo (PluginProv "Defaulted") Nominal (ctPred ct) new_pred
                   predTy = mkPrimEqPredRole Nominal (ctPred ct) new_pred
+              -- TODO: Should we be outputting derived here? Can cause us to
+              -- hit this bug: https://gitlab.haskell.org/ghc/ghc/issues/16246
               new_g <- newGiven (bumpCtLocDepth $ ctLoc ct) predTy (Coercion new_co)
               --new_w <- newDerived (bumpCtLocDepth $ ctLoc ct) predTy
               return $ Right (Nothing,--Just (evCoercion new_co,ct),
@@ -254,7 +256,6 @@ solveRelate mode famInsts PTC{..} ct =
                   do let new_rhs = substTyWith fi_tvs fim_tys fi_rhs
                          new_ev = (ctEvidence ct) {ctev_pred = new_rhs}
                      report <- newReport ptc_report (Log new_rhs (ctFlavour ct) (ctLoc ct))
-                     --pprPanic "tyCo" $ ppr $ tyCoVarsOfCtList ct
                      return $ Right ( Just (mkProof "Relateable" Nominal ty1 ty2, ct)
                                     , case mode of
                                         Defer -> [report]
