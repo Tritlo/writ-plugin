@@ -53,7 +53,8 @@ type instance Promote a (F H b) =
                 :$$: Text "Perhaps you intended to use 'box'?")
 type instance Promote a (F L b) =
      TypeError (Text "Automatic promotion of unlabeled '"
-                :<>: ShowType a :<>: Text "' to a Public '" :<>: ShowType b :<>: Text "'!"
+                :<>: ShowType a :<>: Text "' to a Public '"
+                :<>: ShowType b :<>: Text "'!"
                 :$$: Text "Perhaps you intended to use 'box'?")
 
 newtype F (l :: Label) a = MkF {unF :: a} deriving (Show)

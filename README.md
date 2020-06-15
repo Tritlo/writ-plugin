@@ -11,7 +11,7 @@ that GHC generates. However, when the `defer` flag is set, any such errors are
 converted into warnings, and if integrated with something likeghcide, you can
 even see the generated warnings inline in your editor:
 
-![A display of SACRED running with GHCIDE](images/ghcide.png?raw=True "ghcide")
+![A display of SACRED running with GHCIDE](.github/images/ghcide.png?raw=True "ghcide")
 
 Example:
 
