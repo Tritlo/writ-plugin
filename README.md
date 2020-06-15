@@ -11,26 +11,25 @@ All parametrized by type families.
 Example:
 
 ```haskell
-{-# OPTIONS_GHC -fplugin KindDefaults.Plugin
-                -fplugin-opt=KindDefaults.Plugin:defer
+{-# OPTIONS_GHC -fplugin SACRED.Plugin
+                -fplugin-opt=SACRED.Plugin:debug
+                -fplugin-opt=SACRED.Plugin:defer
+                -dcore-lint
                  #-}
 -- Plugin:
 {-# LANGUAGE DataKinds #-}
-{-# LANGUAGE KindSignatures #-}
 {-# LANGUAGE FlexibleInstances #-}
 {-# LANGUAGE MultiParamTypeClasses #-}
 {-# LANGUAGE FlexibleContexts #-}
 {-# LANGUAGE TypeFamilies #-}
-{-# LANGUAGE TemplateHaskell #-}
 {-# LANGUAGE PolyKinds #-}
-{-# LANGUAGE RoleAnnotations #-}
 {-# LANGUAGE UndecidableInstances #-}
 {-# LANGUAGE TypeOperators #-}
---Test
-{-# LANGUAGE TypeApplications #-}
-module Main where
+{-# LANGUAGE RoleAnnotations #-}
+module Main (main) where
 
-import KindDefaults.Plugin (Default, Promote, Ignore, Relate)
+
+import SACRED.Configure (Default, Promote, Ignore, Relate)
 import GHC.TypeLits (TypeError(..),ErrorMessage(..))
 
 data Label = L | H deriving (Show)
@@ -44,11 +43,8 @@ type instance Default Label = L
 -- directly (e.g. Relate Label L H), or use variables. If you use the variables,
 -- you can further compute to e.g. pretty print the labels.
 type instance Relate Label (n :: Label) (m :: Label) =
-    TypeError (Text "Forbidden flow from "
-                 :<>: LabelPpr (Max n m)
-                 :<>: Text " to "
-                 :<>: LabelPpr (Min n m)
-                 :<>: Text "!")
+    TypeError (Text "Forbidden flow from " :<>: LabelPpr (Max n m)
+               :<>: Text " to " :<>: LabelPpr (Min n m) :<>: Text "!")
 
 type family LabelPpr (k :: Label) where
     LabelPpr L = Text "Public (L)"
@@ -57,11 +53,8 @@ type family LabelPpr (k :: Label) where
 -- Giving the constraint (Less H L) an ignoreable instance simply means that
 -- whenever a (Less H L) constraint can't be solved, that is ignored.
 type instance Ignore (Less n m) =
-    TypeError (Text "Forbidden flow from "
-                 :<>: LabelPpr (Max n m)
-                 :<>: Text " to "
-                 :<>: LabelPpr (Min n m)
-                 :<>: Text "!")
+    TypeError (Text "Forbidden flow from " :<>: LabelPpr (Max n m)
+              :<>: Text " to " :<>: LabelPpr (Min n m) :<>: Text "!")
 
 newtype F (l :: Label) a = MkF {unF :: a} deriving (Show)
 
@@ -84,7 +77,7 @@ instance Less l l where
 newtype Age = MkAge Int deriving (Show)
 
 type family (Max (l :: Label) (l2 :: Label)) ::Label where
-    Max H _ = H 
+    Max H _ = H
     Max _ H = H
     Max _ _ = L
 
@@ -95,10 +88,13 @@ type family Min (l :: Label) (l2 :: Label) where
 f :: Less H a => F a b -> F H b
 f = MkF . unF
 
+fa :: Less L H => F a b -> F H b
+fa = MkF . unF
+
 f2 :: Max l1 l2 ~ H => F l1 a -> F l2 a
 f2 = MkF . unF
 
-f3 :: H ~ L => F l1 a -> F l2 a
+f3 :: (L ~ L, H ~ L) => F l1 a -> F l2 a
 f3 = MkF . unF
 
 f4 :: Less H L => F a b -> F a b
@@ -106,10 +102,11 @@ f4 = MkF . unF
 
 
 main :: IO ()
-main = do print "hello"
+main = do print "hello!"
           -- We can solve (Less H a) by defaulting a ~ L, and then solving
           -- Less H L by ignoring it.
           print (f (MkF True))
+          print (fa (MkF True))
           -- By defaulting l1 and l2 to L, Max l1 l2 becomes L
           -- we then solve this by equivaling L ~ H.
           print (f2 (MkF False))
@@ -123,61 +120,65 @@ main = do print "hello"
           -- Not that we are turning this into a coercion, so that if
           -- Int is coercible to Age, the promotion works.
           print ((1 :: Int) :: F L Age)
-
 ```
 
 This will output:
 
 ```console
-Test.hs:98:18: warning: Defaulting ‘a :: Label’ to ‘L’
+
+Test.hs:95:18: warning:
+    Defaulting ‘a0 :: Label’ to ‘'L’ in ‘Less 'H a0’!
    |
-98 |           print (f (MkF True))
+95 |           print (f (MkF True))
    |                  ^^^^^^^^^^^^
 
-Test.hs:101:18: warning:
+Test.hs:99:18: warning:
+    Defaulting ‘l10 :: Label’ to ‘'L’ in ‘Max l10 l20 ~ 'H’!
+   |
+99 |           print (f2 (MkF False))
+   |                  ^^^^^^^^^^^^^^
+
+Test.hs:99:18: warning:
+    Defaulting ‘l20 :: Label’ to ‘'L’ in ‘Max l10 l20 ~ 'H’!
+   |
+99 |           print (f2 (MkF False))
+   |                  ^^^^^^^^^^^^^^
+
+Test.hs:99:18: warning:
+    Forbidden flow from Secret (H) to Public (L)!
+   |
+99 |           print (f2 (MkF False))
+   |                  ^^^^^^^^^^^^^^
+
+Test.hs:102:18: warning:
     Forbidden flow from Secret (H) to Public (L)!
     |
-101 |           print (f2 (MkF False))
-    |                  ^^^^^^^^^^^^^^
-
-Test.hs:101:18: warning: Defaulting ‘l1 :: Label’ to ‘L’
-    |
-101 |           print (f2 (MkF False))
-    |                  ^^^^^^^^^^^^^^
-
-Test.hs:101:18: warning: Defaulting ‘l2 :: Label’ to ‘L’
-    |
-101 |           print (f2 (MkF False))
-    |                  ^^^^^^^^^^^^^^
-
-Test.hs:104:18: warning:
-    Forbidden flow from Secret (H) to Public (L)!
-    |
-104 |           print (f3 (MkF 0))
+102 |           print (f3 (MkF 0))
     |                  ^^^^^^^^^^
 
-Test.hs:107:18: warning:
+Test.hs:105:18: warning:
     Automatic promotion of unlabeled 'Bool' to a Secret 'Bool'!
     Perhaps you intended to use 'box'?
     |
-107 |           print (True :: F H Bool)
+105 |           print (True :: F H Bool)
     |                  ^^^^
 
-Test.hs:108:18: warning:
+Test.hs:106:18: warning:
     Automatic promotion of unlabeled 'Bool' to a Public 'Bool'!
     Perhaps you intended to use 'box'?
     |
-108 |           print (True :: F L Bool)
+106 |           print (True :: F L Bool)
     |                  ^^^^
 
-Test.hs:111:19: warning:
+Test.hs:109:19: warning:
     Automatic promotion of unlabeled 'Int' to a Public 'Age'!
     Perhaps you intended to use 'box'?
     |
-111 |           print ((1 :: Int) :: F L Age)
+109 |           print ((1 :: Int) :: F L Age)
     |                   ^^^^^^^^
-Linking /home/tritlo/kind-default-plugin/dist-newstyle/build/x86_64-linux/ghc-8.10.1/Test-1.0.0/x/test/build/test/test ...
-"hello"
+Linking /home/tritlo/kind-default-plugin/dist-newstyle/build/x86_64-linux/ghc-8.8.3/Test-1.0.0/x/test/build/test/test ...
+"hello!"
+MkF {unF = True}
 MkF {unF = True}
 MkF {unF = False}
 MkF {unF = 0}
@@ -187,5 +188,5 @@ MkF {unF = True}
 MkF {unF = MkAge 1}
 ```
 
-I.e. all the would be errors are turned into warnings, and the code still
-compiles and runs.
+I.e. all the would be errors are turned into warnings, and the code compiles and
+runs, with the correct core being generated (as verified by `-dcore-lint`).
