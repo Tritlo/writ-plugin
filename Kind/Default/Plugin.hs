@@ -44,7 +44,6 @@ import GHC.Types.Id.Make
 import GhcPlugins hiding (TcPlugin)
 import TcRnTypes
 import TcPluginM
-import Constraint
 import ErrUtils (Severity(SevWarning))
 import TcEvidence
 
@@ -52,7 +51,6 @@ import FamInstEnv
 
 import TysPrim
 import PrelNames
-import Predicate
 import TyCoRep
 
 import ClsInst
@@ -61,6 +59,21 @@ import Inst hiding (newWanted)
 
 import MkId
 import TcMType (fillCoercionHole)
+
+#if __GLASGOW_HASKELL__ < 810
+
+-- Backported from 8.10
+isEqPrimPred = isCoVarType
+instance Outputable SDoc where
+  ppr x = x
+
+#else
+
+import Constraint
+import Predicate
+
+#endif
+
 #endif
 
 --------------------------------------------------------------------------------
