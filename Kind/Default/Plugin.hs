@@ -10,10 +10,10 @@ import TcRnTypes
 import TcPluginM
 import Constraint 
 import ErrUtils (Severity(SevWarning))
-import TcEvidence (EvTerm, evCoercion)
+import TcEvidence --(EvTerm (..), evCoercion)
 
 import Control.Monad (when, guard, foldM)
-import Data.Maybe (mapMaybe, catMaybes, fromMaybe)
+import Data.Maybe (mapMaybe, catMaybes, fromMaybe, fromJust)
 import Data.Either
 import Data.IORef
 import Data.List (nub, sort)
@@ -23,13 +23,20 @@ import FamInstEnv
 
 import TysPrim (equalityTyCon)
 import PrelNames (eqPrimTyConKey)
-import Predicate (EqRel(NomEq), isEqPrimPred)
-import TyCoRep (UnivCoProvenance(..))
+import Predicate (EqRel(NomEq), isEqPrimPred, predTypeEqRel)
+import TyCoRep (UnivCoProvenance(..), mkTyCoVarTy)
 import Data.Kind (Constraint)
 import Data.Data (Data, toConstr)
 
 import GHC.TypeLits(TypeError(..), ErrorMessage(..))
 import GHC.Hs
+--import MkCore
+--import TcHsSyn (zonkTcTypeToType)
+import ClsInst
+import Class
+import Inst (newClsInst)
+
+import MkId (mkDictFunId)
 
 --------------------------------------------------------------------------------
 -- Exported
@@ -104,6 +111,7 @@ kindDefaultPlugin opts = TcPlugin initialize solve stop
                   tcPluginIO $ putStrLn (str ++ " " ++ showSDoc dflags (ppr a))
         ; pprDebug "Solving" empty
         ; mapM_ (pprDebug "Given:") given
+        ; mapM_ (pprDebug "Given:" . ctEvExpr. ctEvidence) given
         ; mapM_ (pprDebug "Derived:") derived
         ; mapM_ (pprDebug "Wanted:") wanted
         ; instEnvs <- getFamInstEnvs
@@ -182,33 +190,49 @@ solveDefault _ famInsts PTC{..} ct =
                       --      rhs = mkTyConApp ptc_default [kind]
                       -- which would result in var ~ Default kind
                       rhs = fi_rhs
-                      eqNom = equalityTyCon Nominal
-                      predTy = mkTyConApp eqNom [kind, kind, mkTyVarTy var, rhs]
-                      hole = CoercionHole {ch_co_var=var, ch_ref = ref}
-                      ev = CtWanted {ctev_pred = predTy , ctev_nosh = WDeriv,
-                                     ctev_dest = HoleDest hole,
-                                     ctev_loc = ctLoc ct}
-                  return $ Just (CTyEqCan {cc_ev = ev, cc_tyvar = var,
-                                          cc_rhs = rhs, cc_eq_rel = NomEq},
+                      varTy = mkTyCoVarTy var
+                      eq_role = Nominal
+                      eq_con = equalityTyCon eq_role
+                      predTy = mkTyConApp eq_con [kind, kind, varTy, rhs]
+                      eq_rel = predTypeEqRel predTy
+                      proof = evCoercion $ mkCoVarCo var
+                      --proof = evCoercion $ mkReflCo Nominal rhs
+                  base_evar <- newEvVar predTy
+                  let new_evar = setIdDetails base_evar coVarDetails
+                  setEvBind $ mkGivenEvBind new_evar proof
+                  let new_ev = CtGiven { ctev_pred = predTy,
+                                         ctev_evar = new_evar,
+                                         ctev_loc  = ctLoc ct}
+                  -- new_ev <- newWanted (ctLoc ct) predTy
+                  return $ Just (setCtLoc (CTyEqCan { cc_ev = new_ev,
+                                                      cc_tyvar = var,
+                                                      cc_rhs = rhs,
+                                                      cc_eq_rel = eq_rel})
+                                           (ctLoc ct),
                                  Log predTy (ctLoc ct))
              _ -> return Nothing
 
 
 -- Solves con :: Constraint if Ignore con
 solveIgnore :: Mode -> FamInstEnvs -> PluginTyCons -> Ct -> TcPluginM Solution
-solveIgnore mode famInsts PTC{..} ct =
+solveIgnore mode famInsts PTC{..} ct@CDictCan{cc_ev=cc_ev,
+                                              cc_class=cls,
+                                              cc_tyargs=tys,
+                                              cc_pend_sc=psc} =
    case lookupFamInstEnv famInsts ptc_ignore [ctPred ct] of
       [] -> return $ Left ct
-      [FamInstMatch {fim_instance=FamInst{..}, ..}] ->
+      _ | not (null $ classMethods cls) -> return $ Left ct -- We only do empty classes
+      [FamInstMatch {fim_instance=fi@FamInst{fi_tys=fi_tys@(ignored:_),..}, ..}] ->
             do let new_rhs = substTyWith fi_tvs fim_tys fi_rhs
-                   new_ev = (ctEvidence ct) {ctev_pred = new_rhs}
+                   new_ev = cc_ev {ctev_pred = new_rhs}
                report <- newReport ptc_report (Log new_rhs (ctLoc ct))
-               return $ Right (Just (evCoercion coercion, ct),
-                        case mode of
-                           Defer -> [report]
-                           NoDefer -> [CNonCanonical {cc_ev=new_ev}],
-                        [])
-   where (coercion, _) = normaliseType famInsts Phantom (ctPred ct)
+               let cCon = tyConSingleDataCon (classTyCon cls)
+               return $ Right (Just (evDataConApp cCon tys [], ct),
+                               case mode of
+                                 Defer -> [report]
+                                 NoDefer -> [CNonCanonical {cc_ev=new_ev}],
+                               [])
+solveIgnore _ _ _ ct = return $ Left ct
 
 
 -- Solves (a :: k) ~ (b :: k) if Relate k a b or Relate k b a
@@ -266,7 +290,7 @@ solveReport _ _ PTC{..} ct = return $
       _ -> Left ct
 
 newReport :: TyCon -> Log -> TcPluginM Ct
-newReport ptc_report (Log msg loc) = 
+newReport ptc_report (Log msg loc) =
     do ev <- newWanted loc (mkTyConApp ptc_report [msg])
        return $ setCtLoc CNonCanonical{cc_ev=ev} loc
 

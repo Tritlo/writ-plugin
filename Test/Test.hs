@@ -1,5 +1,6 @@
 {-# OPTIONS_GHC -fplugin Kind.Default.Plugin
                 -fplugin-opt=Kind.Default.Plugin:defer
+                -fplugin-opt=Kind.Default.Plugin:debug
                  #-}
 -- Plugin:
 {-# LANGUAGE DataKinds #-}
@@ -13,9 +14,10 @@
 {-# LANGUAGE RoleAnnotations #-}
 {-# LANGUAGE UndecidableInstances #-}
 {-# LANGUAGE TypeOperators #-}
+{-# LANGUAGE RoleAnnotations #-}
 --Test
 {-# LANGUAGE TypeApplications #-}
-module Main where
+module Main (main) where
 
 
 import Kind.Default (Default, Promote, Ignore, Relate)
@@ -66,7 +68,7 @@ instance Less l l where
 newtype Age = MkAge Int deriving (Show)
 
 type family (Max (l :: Label) (l2 :: Label)) ::Label where
-    Max H _ = H 
+    Max H _ = H
     Max _ H = H
     Max _ _ = L
 
@@ -76,6 +78,9 @@ type family Min (l :: Label) (l2 :: Label) where
 
 f :: Less H a => F a b -> F H b
 f = MkF . unF
+
+fa :: Less L H => F a b -> F H b
+fa = MkF . unF
 
 f2 :: Max l1 l2 ~ H => F l1 a -> F l2 a
 f2 = MkF . unF
@@ -88,10 +93,11 @@ f4 = MkF . unF
 
 
 main :: IO ()
-main = do print "hello"
+main = do --print "hello"
           -- We can solve (Less H a) by defaulting a ~ L, and then solving
           -- Less H L by ignoring it.
           print (f (MkF True))
+          print (fa (MkF True))
           -- By defaulting l1 and l2 to L, Max l1 l2 becomes L
           -- we then solve this by equivaling L ~ H.
           print (f2 (MkF False))
@@ -102,6 +108,6 @@ main = do print "hello"
           -- We can promote automatically, ignoring the labels.
           print (True :: F H Bool)
           print (True :: F L Bool)
-          -- Not that we are turning this into a coercion, so that if
-          -- Int is coercible to Age, the promotion works.
+          -- -- Not that we are turning this into a coercion, so that if
+          -- -- Int is coercible to Age, the promotion works.
           print ((1 :: Int) :: F L Age)
