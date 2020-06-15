@@ -1,2 +1,4 @@
 packages: ./
           ./Test
+
+with-compiler: /home/tritlo/tweag-ghc/_build/stage1/bin/ghc

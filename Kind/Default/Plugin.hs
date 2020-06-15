@@ -2,15 +2,10 @@
 {-# LANGUAGE TypeFamilies #-}
 {-# LANGUAGE DataKinds #-}
 {-# LANGUAGE RecordWildCards #-}
+{-# LANGUAGE CPP #-}
 module Kind.Default.Plugin ( plugin, module Kind.Default) where
 
 import Kind.Default
-import GhcPlugins hiding (TcPlugin)
-import TcRnTypes
-import TcPluginM
-import Constraint 
-import ErrUtils (Severity(SevWarning))
-import TcEvidence --(EvTerm (..), evCoercion)
 
 import Control.Monad (when, guard, foldM)
 import Data.Maybe (mapMaybe, catMaybes, fromMaybe, fromJust)
@@ -18,25 +13,52 @@ import Data.Either
 import Data.IORef
 import Data.List (nub, sort)
 import Data.Function (on)
-
-import FamInstEnv
-
-import TysPrim (equalityTyCon)
-import PrelNames (eqPrimTyConKey)
-import Predicate (EqRel(NomEq), isEqPrimPred, predTypeEqRel)
-import TyCoRep (UnivCoProvenance(..), mkTyCoVarTy)
 import Data.Kind (Constraint)
 import Data.Data (Data, toConstr)
 
 import GHC.TypeLits(TypeError(..), ErrorMessage(..))
-import GHC.Hs
---import MkCore
---import TcHsSyn (zonkTcTypeToType)
+
+#if __GLASGOW_HASKELL__ > 810
+import GHC.Plugins hiding (TcPlugin)
+import GHC.Tc.Plugin
+
+import GHC.Tc.Types
+import GHC.Tc.Types.Evidence
+import GHC.Tc.Types.Constraint
+
+
+import GHC.Core.FamInstEnv
+import GHC.Core.TyCo.Rep
+import GHC.Core.Predicate
+import GHC.Core.Class
+
+import GHC.Utils.Error
+
+import GHC.Builtin.Types.Prim
+import GHC.Builtin.Names
+
+import GHC.Types.Id.Make
+#else
+import GhcPlugins hiding (TcPlugin)
+import TcRnTypes
+import TcPluginM
+import Constraint
+import ErrUtils (Severity(SevWarning))
+import TcEvidence
+
+import FamInstEnv
+
+import TysPrim
+import PrelNames
+import Predicate
+import TyCoRep
+
 import ClsInst
 import Class
-import Inst (newClsInst)
+import Inst hiding (newWanted)
 
-import MkId (mkDictFunId)
+import MkId
+#endif
 
 --------------------------------------------------------------------------------
 -- Exported
@@ -87,9 +109,11 @@ instance Outputable Log where
 
 addWarning :: DynFlags -> Log -> IO()
 addWarning dflags log = warn (ppr log)
-  where warn = putLogMsg dflags NoReason SevWarning
-                         (RealSrcSpan $ logSrc log)
-                         (defaultErrStyle dflags)
+#if __GLASGOW_HASKELL__ > 810
+  where warn = putLogMsg dflags NoReason SevWarning (RealSrcSpan (logSrc log) Nothing)
+#else
+  where warn = putLogMsg dflags NoReason SevWarning (RealSrcSpan (logSrc log)) (defaultErrStyle dflags)
+#endif
 
 data Mode = Defer | NoDefer deriving (Eq, Ord, Show)
 
