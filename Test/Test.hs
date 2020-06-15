@@ -5,19 +5,14 @@
                  #-}
 -- Plugin:
 {-# LANGUAGE DataKinds #-}
-{-# LANGUAGE KindSignatures #-}
 {-# LANGUAGE FlexibleInstances #-}
 {-# LANGUAGE MultiParamTypeClasses #-}
 {-# LANGUAGE FlexibleContexts #-}
 {-# LANGUAGE TypeFamilies #-}
-{-# LANGUAGE TemplateHaskell #-}
 {-# LANGUAGE PolyKinds #-}
-{-# LANGUAGE RoleAnnotations #-}
 {-# LANGUAGE UndecidableInstances #-}
 {-# LANGUAGE TypeOperators #-}
 {-# LANGUAGE RoleAnnotations #-}
---Test
-{-# LANGUAGE TypeApplications #-}
 module Main (main) where
 
 
@@ -82,32 +77,32 @@ type family Min (l :: Label) (l2 :: Label) where
 f :: Less H a => F a b -> F H b
 f = MkF . unF
 
--- fa :: Less L H => F a b -> F H b
--- fa = MkF . unF
+fa :: Less L H => F a b -> F H b
+fa = MkF . unF
 
--- f2 :: Max l1 l2 ~ H => F l1 a -> F l2 a
--- f2 = MkF . unF
+f2 :: Max l1 l2 ~ H => F l1 a -> F l2 a
+f2 = MkF . unF
 
--- f3 :: (L ~ L, H ~ L) => F l1 a -> F l2 a
--- f3 = MkF . unF
+f3 :: (L ~ L, H ~ L) => F l1 a -> F l2 a
+f3 = MkF . unF
 
--- f4 :: Less H L => F a b -> F a b
--- f4 = MkF . unF
+f4 :: Less H L => F a b -> F a b
+f4 = MkF . unF
 
 
 main :: IO ()
-main = do --print "hello"
+main = do print "hello!"
           -- We can solve (Less H a) by defaulting a ~ L, and then solving
           -- Less H L by ignoring it.
           print (f (MkF True))
-          -- print (fa (MkF True))
+          print (fa (MkF True))
           -- By defaulting l1 and l2 to L, Max l1 l2 becomes L
           -- we then solve this by equivaling L ~ H.
-          -- print (f2 (MkF False))
+          print (f2 (MkF False))
           -- Here we're asked to solve H ~ L, which we can do by collapsing
           -- Label.
-          -- print (f3 (MkF 0))
-          -- print (f4 (MkF 0))
+          print (f3 (MkF 0))
+          print (f4 (MkF 0))
           -- We can promote automatically, ignoring the labels.
           -- print (True :: F H Bool)
           -- print (True :: F L Bool)
