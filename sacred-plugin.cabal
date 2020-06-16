@@ -1,8 +1,21 @@
 name: sacred-plugin
-cabal-version: >= 1.24
+cabal-version: 1.24
 build-type: Simple
-version: 1.0.0
-synopsis: A plugin that turns phantom type errors into warnings
+version: 0.0.1
+author: Matthías Páll Gissurarson
+maintainer: mpg@mpg.is
+synopsis: Gadually type programs with representationally equal data
+description:
+
+   The SACRED plugins allows somewhat automatic coercion of representationally
+   equivalent domains. By parametrizing the plugin with the Relate, Ignore,
+   Default, and Promote families, library authors can extend the type system
+   of GHC to treat representationally equivalent data as nominally equivalent.
+   With the `-plugin-opt=SACRED.Plugin:defer` flag set, errors described by
+   these families are turned into warnings, allowing the users to compiler and
+   test their programs even in the presence of computationally irrelevant errors.
+
+category: Compiler Plugin
 license: MIT
 license-file: LICENSE
 
@@ -16,4 +29,4 @@ library
 
 Source-repository head
   Type:     git
-  Location: https://github.com/tritlo/kindle-default-plugin.git
+  Location: https://github.com/tritlo/sacred-plugin.git
