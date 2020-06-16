@@ -70,8 +70,7 @@ newtype Age = MkAge Int deriving (Show)
 
 type family (Max (l :: Label) (l2 :: Label)) ::Label where
     Max H _ = H
-    Max _ H = H
-    Max _ _ = L
+    Max _ l = l
 
 type family Min (l :: Label) (l2 :: Label) where
     Min L _ = L
@@ -86,7 +85,7 @@ fa = MkF . unF
 f2 :: Max l1 l2 ~ H => F l1 a -> F l2 a
 f2 = MkF . unF
 
-f3 :: (L ~ L, H ~ L) => F l1 a -> F l2 a
+f3 :: H ~ L => F l1 a -> F l2 a
 f3 = MkF . unF
 
 f4 :: Less H L => F a b -> F a b
@@ -112,3 +111,6 @@ main = do print "hello!"
           -- Not that we are turning this into a coercion, so that if
           -- Int is coercible to Age, the promotion works.
           print ((1 :: Int) :: F L Age)
+          -- If you have an unspecified type variable that can be defaulted, you
+          -- can also promote.
+          print ((1 :: Int) :: F l Age)
