@@ -1,17 +1,17 @@
-name: sacred-plugin
+name: grit-plugin
 cabal-version: 1.24
 build-type: Simple
 version: 0.0.1
 author: Matthías Páll Gissurarson
 maintainer: mpg@mpg.is
-synopsis: Gadually type programs with representationally equal data
+synopsis: Gadually type programs with runtime-irrelevant types
 description:
 
-   The SACRED plugins allows somewhat automatic coercion of representationally
+   The GRIT plugin allows somewhat automatic coercion of representationally
    equivalent domains. By parametrizing the plugin with the Relate, Ignore,
    Default, and Promote families, library authors can extend the type system
    of GHC to treat representationally equivalent data as nominally equivalent.
-   With the `-plugin-opt=SACRED.Plugin:defer` flag set, errors described by
+   With the `-plugin-opt=GRIT.Plugin:defer` flag set, errors described by
    these families are turned into warnings, allowing the users to compiler and
    test their programs even in the presence of computationally irrelevant errors.
 
@@ -24,9 +24,9 @@ library
   build-depends: base >= 4 && < 5,
                  ghc >= 8 && < 9
   exposed-modules:
-    SACRED.Plugin,
-    SACRED.Configure
+    GRIT.Plugin,
+    GRIT.Configure
 
 Source-repository head
   Type:     git
-  Location: https://github.com/tritlo/sacred-plugin.git
+  Location: https://github.com/tritlo/grit-plugin.git

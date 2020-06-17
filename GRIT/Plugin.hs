@@ -3,9 +3,9 @@
 {-# LANGUAGE DataKinds #-}
 {-# LANGUAGE RecordWildCards #-}
 {-# LANGUAGE CPP #-}
-module SACRED.Plugin ( plugin, module SACRED.Configure ) where
+module GRIT.Plugin ( plugin, module GRIT.Configure ) where
 
-import SACRED.Configure
+import GRIT.Configure
 
 import Control.Monad (when, guard, foldM, zipWithM)
 import Data.Maybe (mapMaybe, catMaybes, fromMaybe, fromJust, listToMaybe, isJust)
@@ -85,7 +85,7 @@ import Predicate
 -- Exported
 
 plugin :: Plugin
-plugin = defaultPlugin { tcPlugin = Just . sacredPlugin
+plugin = defaultPlugin { tcPlugin = Just . gritPlugin
                        , pluginRecompile = purePlugin }
 
 
@@ -121,7 +121,7 @@ instance Outputable Log where
    ppr Log{..} =
         case userTypeError_maybe log_pred_ty of
            Just msg -> pprUserTypeErrorTy msg
-           _ -> text "SACRED" <+> ppr log_pred_ty
+           _ -> text "GRIT" <+> ppr log_pred_ty
    ppr LogDefault{..} = text "Defaulting"
                         -- We want to print a instead of a0
                         <+> quotes (ppr (mkTyVarTy log_var)
@@ -152,8 +152,8 @@ getMode opts = if "defer" `elem` opts
                     then NoWarn else Defer
                else NoDefer
 
-sacredPlugin :: [CommandLineOption] -> TcPlugin
-sacredPlugin opts = TcPlugin initialize solve stop
+gritPlugin :: [CommandLineOption] -> TcPlugin
+gritPlugin opts = TcPlugin initialize solve stop
   where
      debug = "debug" `elem` opts
      mode = getMode opts
@@ -205,7 +205,7 @@ data PluginTyCons = PTC { ptc_default :: TyCon
 
 getPluginTyCons :: TcPluginM PluginTyCons
 getPluginTyCons =
-   do fpmRes <- findImportedModule (mkModuleName "SACRED.Configure") Nothing
+   do fpmRes <- findImportedModule (mkModuleName "GRIT.Configure") Nothing
       case fpmRes of
          Found _ mod  ->
              do ptc_default <- getTyCon mod "Default"
@@ -310,7 +310,7 @@ solveRelate mode famInsts PTC{..} ct =
            do let msg = substTyWith fi_tvs fim_tys fi_rhs
                   ty_err = newTyErr ct msg
               report <- newReport ptc_report ct msg
-              return $ Right (Just (mkProof "sacred-relateable" ty1 ty2, ct)
+              return $ Right (Just (mkProof "grit-relateable" ty1 ty2, ct)
                               , case mode of
                                  NoDefer -> [ty_err]
                                  _ -> [report]
@@ -331,7 +331,7 @@ solvePromote mode famInsts PTC{..} ct =
                     eq_ty = mkPrimEqPredRole Representational ty1 ty2
                 report <- newReport ptc_report ct msg
                 check_coerce <- mkDerived (bumpCtLocDepth $ ctLoc ct) eq_ty
-                return $ Right ( Just (mkProof "sacred-promoteable" ty1 ty2, ct)
+                return $ Right ( Just (mkProof "grit-promoteable" ty1 ty2, ct)
                                , case mode of
                                    NoDefer -> [ty_err]
                                    _ -> [check_coerce, report]

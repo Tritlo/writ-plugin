@@ -1,5 +1,5 @@
-{-# OPTIONS_GHC -fplugin SACRED.Plugin
-                -fplugin-opt=SACRED.Plugin:defer
+{-# OPTIONS_GHC -fplugin GRIT.Plugin
+                -fplugin-opt=GRIT.Plugin:defer
                 -dcore-lint
                  #-}
 -- Plugin:
@@ -15,7 +15,7 @@
 module Main (main) where
 
 
-import SACRED.Configure (Default, Promote, Ignore, Relate)
+import GRIT.Configure (Default, Promote, Ignore, Relate)
 import GHC.TypeLits (TypeError(..),ErrorMessage(..))
 
 data Label = L | H deriving (Show)

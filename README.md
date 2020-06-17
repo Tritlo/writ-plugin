@@ -1,6 +1,6 @@
-The SACRED Plugin
+The GRIT Plugin
 ======
-Somewhat Automatic Coercion of Representationally Equivalent Domains
+Gradual Runtime-Irrelevant Typing
 --------------------------------------------------------------------
 
 A type-checker plugin that allows users to "defaulting" a data kind to a value,
@@ -11,14 +11,14 @@ that GHC generates. However, when the `defer` flag is set, any such errors are
 converted into warnings, and if integrated with something likeghcide, you can
 even see the generated warnings inline in your editor:
 
-![A display of SACRED running with GHCIDE](.github/images/ghcide.png?raw=True "ghcide")
+![A display of GRIT running with GHCIDE](.github/images/ghcide.png?raw=True "ghcide")
 
 Example:
 
 ```haskell
-{-# OPTIONS_GHC -fplugin SACRED.Plugin
-                -fplugin-opt=SACRED.Plugin:debug
-                -fplugin-opt=SACRED.Plugin:defer
+{-# OPTIONS_GHC -fplugin GRIT.Plugin
+                -fplugin-opt=GRIT.Plugin:debug
+                -fplugin-opt=GRIT.Plugin:defer
                 -dcore-lint
                  #-}
 -- Plugin:
@@ -34,7 +34,7 @@ Example:
 module Main (main) where
 
 
-import SACRED.Configure (Default, Promote, Ignore, Relate)
+import GRIT.Configure (Default, Promote, Ignore, Relate)
 import GHC.TypeLits (TypeError(..),ErrorMessage(..))
 
 data Label = L | H deriving (Show)
