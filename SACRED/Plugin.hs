@@ -183,10 +183,10 @@ sacredPlugin opts = TcPlugin initialize solve stop
                                                more ++ new_more,
                                                logs ++ new_logs)) }
         ; let order = [ (solveReport,  "Reporting")
+                      , (solveDefault, "Defaulting")
                       , (solveRelate,  "Relating")
                       , (solveIgnore,  "Ignoring")
-                      , (solvePromote, "Promoting")
-                      , (solveDefault, "Defaulting") ]
+                      , (solvePromote, "Promoting") ]
               to_check = wanted ++ derived
         ; mapM_ (pprDebug "Checking" . pprRep) to_check
         ; (_, (solved_wanteds, more_cts, logs)) <-
