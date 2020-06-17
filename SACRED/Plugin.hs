@@ -103,6 +103,7 @@ instance Ord Log where
                 then case (a,b) of
                   (Log{}, LogDefault{}) -> GT
                   (LogDefault{}, Log{}) -> LT
+                  (_, _) -> EQ
                 else compare (logSrc a) (logSrc b)
 
 instance Eq Log where
@@ -176,6 +177,7 @@ sacredPlugin opts = TcPlugin initialize solve stop
                             mapM (solveFun mode instEnvs pluginTyCons) unsolved
                     ; mapM_ (pprDebug (explain ++ "-sols")) new_solved
                     ; mapM_ (pprDebug (explain ++ "-more")) new_more
+                    ; mapM_ (pprDebug (explain ++ "-reps") . pprRep) new_more
                     ; mapM_ (pprDebug (explain ++ "-logs")) new_logs
                     ; return (still_unsolved, (solved ++ new_solved,
                                                more ++ new_more,
@@ -186,6 +188,7 @@ sacredPlugin opts = TcPlugin initialize solve stop
                       , (solvePromote, "Promoting")
                       , (solveDefault, "Defaulting") ]
               to_check = wanted ++ derived
+        ; mapM_ (pprDebug "Checking" . pprRep) to_check
         ; (_, (solved_wanteds, more_cts, logs)) <-
              foldM solveWFun (to_check, ([],[],[])) order
         ; tcPluginIO $ modifyIORef warns (logs ++)
@@ -224,6 +227,15 @@ type Solution = Either Ct (Maybe (EvTerm, Ct), -- The solution to the Ct
 
 wontSolve :: Ct -> TcPluginM Solution
 wontSolve = return . Left
+
+pprRep :: Ct -> SDoc
+pprRep ct =
+  case userTypeError_maybe (ctPred ct) of
+     Just m -> pprUserTypeErrorTy m <+> ppr (ctLocSpan $ ctLoc ct)
+     _ -> case splitTyConApp_maybe (ctPred ct) of
+            Just (tc, [msg]) -> pprUserTypeErrorTy msg <+> ppr (ctLocSpan $ ctLoc ct)
+            _ -> pprUserTypeErrorTy (ctPred ct) <+> ppr (ctLocSpan $ ctLoc ct)
+
 
 -- Defaults any ambiguous type variables of kind k to l if Default k = l
 solveDefault :: Mode -> FamInstEnvs -> PluginTyCons -> Ct -> TcPluginM Solution
