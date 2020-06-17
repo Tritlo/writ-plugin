@@ -180,9 +180,11 @@ sacredPlugin opts = TcPlugin initialize solve stop
                     ; return (still_unsolved, (solved ++ new_solved,
                                                more ++ new_more,
                                                logs ++ new_logs)) }
-        ; let order = [(solveReport,  "Reporting"), (solveDefault, "Defaulting")
-                      ,(solveRelate,  "Relating"),  (solveIgnore,  "Ignoring")
-                      ,(solvePromote, "Promoting")]
+        ; let order = [ (solveReport,  "Reporting")
+                      , (solveRelate,  "Relating")
+                      , (solveIgnore,  "Ignoring")
+                      , (solvePromote, "Promoting")
+                      , (solveDefault, "Defaulting") ]
               to_check = wanted ++ derived
         ; (_, (solved_wanteds, more_cts, logs)) <-
              foldM solveWFun (to_check, ([],[],[])) order
@@ -271,11 +273,14 @@ solveIgnore mode famInsts PTC{..} ct@CDictCan{cc_ev=cc_ev, cc_class=cls,
       [] -> wontSolve ct
       _ | not (null $ classMethods cls) -> wontSolve ct -- We only do empty classes
       [FamInstMatch {fim_instance=FamInst{..},..}] ->
-            do let new_rhs = substTyWith fi_tvs fim_tys fi_rhs
-                   report = newReport ptc_report ct new_rhs
+            do let msg = substTyWith fi_tvs fim_tys fi_rhs
+                   ty_err = newTyErr ct msg
                    classCon = tyConSingleDataCon (classTyCon cls)
+               report <- newReport ptc_report ct msg
                return $ Right ( Just (evDataConApp classCon cls_tys [], ct)
-                              , [report]
+                              , case mode of
+                                 NoDefer -> [ty_err]
+                                 _ -> [report]
                               , [])
 solveIgnore _ _ _ ct = wontSolve ct
 
@@ -290,10 +295,13 @@ solveRelate mode famInsts PTC{..} ct =
         ++ lookupFamInstEnv famInsts ptc_relate [k1, ty2, ty1] of
          [] -> wontSolve ct
          (FamInstMatch {fim_instance=FamInst{..}, ..}:_) ->
-           do let new_rhs = substTyWith fi_tvs fim_tys fi_rhs
-                  report = newReport ptc_report ct new_rhs
+           do let msg = substTyWith fi_tvs fim_tys fi_rhs
+                  ty_err = newTyErr ct msg
+              report <- newReport ptc_report ct msg
               return $ Right (Just (mkProof "sacred-relateable" ty1 ty2, ct)
-                             , [report]
+                              , case mode of
+                                 NoDefer -> [ty_err]
+                                 _ -> [report]
                              , [])
     _ -> wontSolve ct
 
@@ -306,13 +314,14 @@ solvePromote mode famInsts PTC{..} ct =
         case lookupFamInstEnv famInsts ptc_promote [ty1, ty2] of
            [] -> wontSolve ct
            [FamInstMatch {fim_instance=FamInst{..}, ..}] ->
-             do let new_rhs = substTyWith fi_tvs fim_tys fi_rhs
+             do let msg = substTyWith fi_tvs fim_tys fi_rhs
+                    ty_err = newTyErr ct msg
                     eq_ty = mkPrimEqPredRole Representational ty1 ty2
-                    report = newReport ptc_report ct new_rhs
+                report <- newReport ptc_report ct msg
                 check_coerce <- mkDerived (bumpCtLocDepth $ ctLoc ct) eq_ty
                 return $ Right ( Just (mkProof "sacred-promoteable" ty1 ty2, ct)
                                , case mode of
-                                   NoDefer -> [report]
+                                   NoDefer -> [ty_err]
                                    _ -> [check_coerce, report]
                                , [])
       _ -> wontSolve ct
@@ -327,12 +336,11 @@ solveReport mode envs PTC{..} ct =
         let ev = Just (evDataConApp (tyConSingleDataCon tyCon) [msg] [], ct)
         Right <$>
          case tryImproveTyErr msg of
-           Just imp -> return (ev, [newReport ptc_report ct imp], [])
+           Just imp -> do report <- newReport ptc_report ct imp
+                          return (ev, [report], [])
            _ -> case mode of
-                   NoWarn -> return (ev, [], [])
                    Defer -> return (ev, [], [Log msg (ctLoc ct)])
-                   NoDefer -> do ty_err <- mkWanted (ctLoc ct) msg
-                                 return (ev, [ty_err], [])
+                   _ -> return (ev, [], [])
       _ -> wontSolve ct
 
 -- tryImproveTyErr goes over a type error type and tries to fully apply all
@@ -379,12 +387,15 @@ mkWanted :: CtLoc -> PredType -> TcPluginM Ct
 mkWanted loc eq_ty = flip setCtLoc loc . CNonCanonical <$> newWanted loc eq_ty
 
 mkGiven :: CtLoc -> PredType -> EvExpr -> TcPluginM Ct
-mkGiven loc eq_ty ev = flip setCtLoc loc . CNonCanonical
-                         <$> newGiven loc eq_ty ev
+mkGiven loc eq_ty ev = flip setCtLoc loc . CNonCanonical <$> newGiven loc eq_ty ev
 
-newReport :: TyCon -> Ct -> PredType -> Ct
-newReport ptc_report ct msg = CNonCanonical(ctEvidence ct){ctev_pred=rep}
+newReport :: TyCon -> Ct -> PredType -> TcPluginM Ct
+newReport ptc_report ct msg =
+ (flip setCtLoc (ctLoc ct) . CNonCanonical) <$> newWanted (ctLoc ct) rep
   where rep = mkTyConApp ptc_report [msg]
+
+newTyErr :: Ct -> PredType -> Ct
+newTyErr ct msg = CNonCanonical (ctEvidence ct){ctev_pred=msg}
 
 mkProof :: String -> Type -> Type -> EvTerm
 mkProof str ty1 ty2 = evCoercion $ mkUnivCo (PluginProv str) Nominal ty1 ty2
