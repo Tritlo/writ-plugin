@@ -1,5 +1,4 @@
 {-# OPTIONS_GHC -fplugin SACRED.Plugin
-                -fplugin-opt=SACRED.Plugin:debug
                 -fplugin-opt=SACRED.Plugin:defer
                 -dcore-lint
                  #-}
@@ -34,8 +33,10 @@ type instance Relate Label (n :: Label) (m :: Label) =
                :<>: Text " to " :<>: LabelPpr (Min n m) :<>: Text "!")
 
 type family LabelPpr (k :: Label) where
-    LabelPpr L = Text "Public (L)"
-    LabelPpr H = Text "Secret (H)"
+    LabelPpr L = Text "Public"
+    LabelPpr H = Text "Secret"
+    LabelPpr l = Text "Labeled " :<>: ShowType l
+
 
 -- Giving the constraint (Less H L) an ignoreable instance simply means that
 -- whenever a (Less H L) constraint can't be solved, that is ignored.
