@@ -92,7 +92,6 @@ f3 = MkF . unF
 f4 :: Less H L => F a b -> F a b
 f4 = MkF . unF
 
-
 main :: IO ()
 main = do print "hello!"
           -- We can solve (Less H a) by defaulting a ~ L, and then solving
@@ -115,3 +114,12 @@ main = do print "hello!"
           -- If you have an unspecified type variable that can be defaulted, you
           -- can also promote.
           print ((1 :: Int) :: F l Age)
+          let labeledMaybe :: F l (Maybe Bool)
+              labeledMaybe = Just True
+          print labeledMaybe
+          -- Since we're automatically promoting, we can even pattern match on
+          -- labeled values.
+          case labeledMaybe of
+            Just True -> print "Was just true"
+            _ -> print "was something else"
+
