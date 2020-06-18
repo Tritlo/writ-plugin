@@ -3,7 +3,7 @@
 {-# LANGUAGE ConstraintKinds #-}
 {-# LANGUAGE TypeFamilies #-}
 module GRIT.Configure (
-        Default, Promote, Ignore, Relate,
+        Default, Promote, Ignore, Discharge,
         Report, Message, OnlyIf,
         TypeError(..), ErrorMessage(..),
 ) where
@@ -22,26 +22,24 @@ type Message = ErrorMessage
 -- ambiguous type variables of kind Label to L
 type family Default k :: k
 
--- Promote means that if we have a value (True :: Bool), we can promote it to (k Bool)
--- Note that Promote a k requires Coercible a k, otherwise a Coercible error  will be produced.
-type family Promote (a :: *) (k :: *) :: Message
-
--- You can use OnlyIf to communicate additional constraints on promotions and
--- relations and ignores. k is usually Message here, but we leave the kind open
--- in case you want to have constraints on defaults.
-type family OnlyIf (c :: Constraint) (m :: Message) :: Message
-type instance OnlyIf k m = m
+-- Discharge means that we are allowed to discharge (a :: k) ~ (b :: k),
+-- if c holds.
+type family Discharge (a :: k) (b :: k) :: Message
 
 -- An Ignore cons means that we are allowd to ignore the constraint con.
 -- Note! This only works for empty classes!
 type family Ignore (k :: Constraint) :: Message
 
--- Relate means that we are allowed to discharge (a :: k) ~ (b :: k),
--- if c holds.
-type family Relate (a :: k) (b :: k) :: Message
+-- Promote means that if we have a value (True :: Bool), we can promote it to (k Bool)
+-- Note that Promote a k requires Coercible a k, otherwise a Coercible error  will be produced.
+type family Promote (a :: *) (k :: *) :: Message
 
+-- OnlyIf can be used to communicate additional constraints on promotions,
+-- discharges, and ignores. 
+type family OnlyIf (c :: Constraint) (m :: Message) :: Message
+type instance OnlyIf k m = m
 
 -- Report is a class we use to wrap TypeErrors so that any type families
--- within can be computed. It's closed, so we know that the only instances of
--- Report will be the ones we generated.
+-- within can be computed. It can be used with a TypeError to turn that error
+-- into a warning at compile time.
 class Report (err :: Message) where

@@ -42,7 +42,7 @@ instance
          :<>: ShowType n :<>: Text ".")), 1 <= n) =>
    IsUnknownOrZero (AtLeast n) where
 
-type instance Relate Unknown (n :: Length) =
+type instance Discharge Unknown (n :: Length) =
     OnlyIf (n ~ AtLeast 0) (TypeError (Text "All unknowns lengths are at least 0"))
 
 -- We also know that is it safe to treat list as vectors with an unknown length.

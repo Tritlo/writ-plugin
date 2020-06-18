@@ -21,11 +21,11 @@ data Label = L | H deriving (Show)
 -- oft the kind Label will be defaulted to L
 type instance Default Label = L
 
--- You can also give the kind the Relate instance, which allows equality
+-- You can also give the kind the Discharge instance, which allows equality
 -- between two of the types. You can either specify the types to match
--- directly (e.g. Relate Label L H), or use variables. If you use the variables,
+-- directly (e.g. Discharge Label L H), or use variables. If you use the variables,
 -- you can further compute to e.g. pretty print the labels.
-type instance Relate (n :: Label) (m :: Label) =
+type instance Discharge (n :: Label) (m :: Label) =
     TypeError (Text "Forbidden flow from " :<>: LabelPpr (Max n m)
                :<>: Text " to " :<>: LabelPpr (Min n m) :<>: Text "!")
 

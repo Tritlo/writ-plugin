@@ -142,22 +142,22 @@ addWarning dflags log = warn (ppr log)
                  (RealSrcSpan (logSrc log)) (defaultErrStyle dflags)
 #endif
 
-data Flags = Flags { f_debug       :: Bool
-                   , f_quiet       :: Bool
-                   , f_no_ignore   :: Bool
-                   , f_no_relate   :: Bool
-                   , f_no_promote  :: Bool
-                   , f_no_default  :: Bool
-                   , f_keep_errors :: Bool }
+data Flags = Flags { f_debug        :: Bool
+                   , f_quiet        :: Bool
+                   , f_no_ignore    :: Bool
+                   , f_no_promote   :: Bool
+                   , f_no_default   :: Bool
+                   , f_keep_errors  :: Bool
+                   , f_no_discharge :: Bool }
 
 getFlags :: [CommandLineOption] -> Flags
-getFlags opts = Flags { f_debug       = "debug"       `elem` opts
-                      , f_quiet       = "quiet"       `elem` opts
-                      , f_no_ignore   = "no-ignore"   `elem` opts
-                      , f_no_relate   = "no-relate"   `elem` opts
-                      , f_no_promote  = "no-promote"  `elem` opts
-                      , f_no_default  = "no-default"  `elem` opts
-                      , f_keep_errors = "keep-errors" `elem` opts }
+getFlags opts = Flags { f_debug        = "debug"          `elem` opts
+                      , f_quiet        = "quiet"          `elem` opts
+                      , f_no_ignore    = "no-ignore"      `elem` opts
+                      , f_no_promote   = "no-promote"     `elem` opts
+                      , f_no_default   = "no-default"     `elem` opts
+                      , f_keep_errors  = "keep-errors"    `elem` opts 
+                      , f_no_discharge = "no-discharge"   `elem` opts }
 
 gritPlugin :: [CommandLineOption] -> TcPlugin
 gritPlugin opts = TcPlugin initialize solve stop
@@ -187,11 +187,11 @@ gritPlugin opts = TcPlugin initialize solve stop
                     ; return (still_unsolved, (solved ++ new_solved,
                                                more ++ new_more,
                                                logs ++ new_logs)) }
-        ; let order = [ (solveReport,  "Reporting")
-                      , (solveDefault, "Defaulting")
-                      , (solveRelate,  "Relating")
-                      , (solveIgnore,  "Ignoring")
-                      , (solvePromote, "Promoting") ]
+        ; let order = [ (solveReport,    "Reporting")
+                      , (solveDefault,   "Defaulting")
+                      , (solveDischarge, "Discharging")
+                      , (solveIgnore,    "Ignoring")
+                      , (solvePromote,   "Promoting") ]
               to_check = wanted ++ derived
         ; mapM_ (pprDebug "Checking" . pprRep) to_check
         ; (_, (solved_wanteds, more_cts, logs)) <-
@@ -206,7 +206,7 @@ data PluginTyCons = PTC { ptc_default :: TyCon
                         , ptc_promote :: TyCon
                         , ptc_only_if :: TyCon
                         , ptc_ignore  :: TyCon
-                        , ptc_relate  :: TyCon
+                        , ptc_discharge  :: TyCon
                         , ptc_report  :: TyCon }
 
 getPluginTyCons :: TcPluginM PluginTyCons
@@ -215,7 +215,7 @@ getPluginTyCons =
       case fpmRes of
          Found _ mod  ->
              do ptc_default <- getTyCon mod "Default"
-                ptc_relate  <- getTyCon mod "Relate"
+                ptc_discharge  <- getTyCon mod "Discharge"
                 ptc_promote <- getTyCon mod "Promote"
                 ptc_ignore  <- getTyCon mod "Ignore"
                 ptc_report  <- getTyCon mod "Report"
@@ -306,20 +306,21 @@ solveIgnore Flags{..} ptc@PTC{..} ct@CDictCan{..} = do
 solveIgnore _ _ ct = wontSolve ct
 
 
--- Solves (a :: k) ~ (b :: k) if Relate k a b or Relate k b a
-solveRelate :: Flags -> PluginTyCons -> Ct -> TcPluginM Solution
-solveRelate Flags{..} _ ct | f_no_relate = wontSolve ct
-solveRelate Flags{..} ptc@PTC{..} ct =
+-- Solves (a :: k) ~ (b :: k) if Discharge k a b or Discharge k b a
+solveDischarge :: Flags -> PluginTyCons -> Ct -> TcPluginM Solution
+solveDischarge Flags{..} _ ct | f_no_discharge = wontSolve ct
+solveDischarge Flags{..} ptc@PTC{..} ct =
   case splitTyConApp_maybe (ctPred ct) of
     Just (tyCon, [k1,k2,ty1,ty2]) | isEqPrimPred (ctPred ct) ->
-      do res <- msum <$> mapM (matchFam ptc_relate) [[k1,ty1,ty2],[k1,ty2,ty1]]
+      do res <- msum <$> mapM (matchFam ptc_discharge) [[k1,ty1,ty2],
+                                                        [k1,ty2,ty1]]
          case res of
            Nothing -> wontSolve ct
            Just (_, rhs) -> do
             let ty_err = newTyErr ct rhs
             report <- newReport ptc_report ct rhs
             additional_constraints <- additionalConstraints ptc (ctLoc ct) rhs
-            return $ Right (Just (mkProof "grit-relateable" ty1 ty2, ct)
+            return $ Right (Just (mkProof "grit-dischargeable" ty1 ty2, ct)
                           , if f_keep_errors then [ty_err]
                             else (report:additional_constraints)
                           , [])
@@ -348,7 +349,7 @@ solvePromote Flags{..} ptc@PTC{..} ct =
       _ -> wontSolve ct
 
 -- Additional constraints allow users to specify additional constraints for
--- promotions and relations.
+-- promotions and discharges.
 additionalConstraints :: PluginTyCons -> CtLoc -> Type -> TcPluginM [Ct]
 additionalConstraints PTC{..} loc ty =
   case splitTyConApp_maybe ty of
