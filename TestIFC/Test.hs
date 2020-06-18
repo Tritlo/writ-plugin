@@ -44,17 +44,16 @@ type instance Ignore (Less n m) =
 -- Promotable (F H _) will change any (a ~ F H b) into Coercible a (F H b), but
 -- only when the label is H. Can also be written as (F _ _), if it should apply
 -- to all labels.
--- type instance Promote _ a (F H b) =
---      TypeError (Text "Automatic promotion of unlabeled '"
---                 :<>: ShowType a :<>: Text "' to a Secret '"
---                 :<>: ShowType b :<>: Text "'!"
---                 :$$: Text "Perhaps you intended to use 'box'?")
-type instance Promote a (F l b) =
-     OnlyIf (Less H l, l ~ H)
-      (TypeError (Text "Automatic promotion of unlabeled '"
-                  :<>: ShowType a :<>: Text "' to a Public '"
-                  :<>: ShowType b :<>: Text "'!"
-                  :$$: Text "Perhaps you intended to use 'box'?"))
+type instance Promote a (F H b) =
+     TypeError (Text "Automatic promotion of unlabeled '"
+                :<>: ShowType a :<>: Text "' to a Secret '"
+                :<>: ShowType b :<>: Text "'!"
+                :$$: Text "Perhaps you intended to use 'box'?")
+type instance Promote a (F L b) =
+     (TypeError (Text "Automatic promotion of unlabeled '"
+                 :<>: ShowType a :<>: Text "' to a Public '"
+                 :<>: ShowType b :<>: Text "'!"
+                 :$$: Text "Perhaps you intended to use 'box'?"))
 
 newtype F (l :: Label) a = MkF {unF :: a} deriving (Show)
 

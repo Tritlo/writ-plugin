@@ -288,16 +288,18 @@ solveDefault Flags{..} PTC{..} ct =
 solveIgnore :: Flags -> PluginTyCons -> Ct -> TcPluginM Solution
 solveIgnore Flags{..} _ ct | f_no_ignore = wontSolve ct
 solveIgnore _ _ ct@CDictCan{..} | not (null $ classMethods cc_class) = wontSolve ct
-solveIgnore Flags{..} PTC{..} ct@CDictCan{..} = do
+solveIgnore Flags{..} ptc@PTC{..} ct@CDictCan{..} = do
   res <- matchFam ptc_ignore [ctPred ct]
   case res of
     Nothing -> wontSolve ct
-    Just (_, msg) ->
-       do let ty_err = newTyErr ct msg
+    Just (_, rhs) ->
+       do let ty_err = newTyErr ct rhs
               classCon = tyConSingleDataCon (classTyCon cc_class)
-          report <- newReport ptc_report ct msg
+          report <- newReport ptc_report ct rhs
+          additional_constraints <- additionalConstraints ptc (ctLoc ct) rhs
           return $ Right ( Just (evDataConApp classCon cc_tyargs [], ct)
-                         , if f_keep_errors then [ty_err] else [report]
+                         , if f_keep_errors then [ty_err]
+                           else (report:additional_constraints)
                          , [])
 solveIgnore _ _ ct = wontSolve ct
 
@@ -305,46 +307,50 @@ solveIgnore _ _ ct = wontSolve ct
 -- Solves (a :: k) ~ (b :: k) if Relate k a b or Relate k b a
 solveRelate :: Flags -> PluginTyCons -> Ct -> TcPluginM Solution
 solveRelate Flags{..} _ ct | f_no_relate = wontSolve ct
-solveRelate Flags{..} PTC{..} ct =
+solveRelate Flags{..} ptc@PTC{..} ct =
   case splitTyConApp_maybe (ctPred ct) of
     Just (tyCon, [k1,k2,ty1,ty2]) | isEqPrimPred (ctPred ct) ->
       do res <- msum <$> mapM (matchFam ptc_relate) [[k1,ty1,ty2],[k1,ty2,ty1]]
          case res of
            Nothing -> wontSolve ct
-           Just (_, rhs) ->
-             do let msg = rhs
-                    ty_err = newTyErr ct msg
-                report <- newReport ptc_report ct msg
-                return $ Right (Just (mkProof "grit-relateable" ty1 ty2, ct)
-                              , if f_keep_errors then [ty_err] else [report]
-                              , [])
+           Just (_, rhs) -> do
+            let ty_err = newTyErr ct rhs
+            report <- newReport ptc_report ct rhs
+            additional_constraints <- additionalConstraints ptc (ctLoc ct) rhs
+            return $ Right (Just (mkProof "grit-relateable" ty1 ty2, ct)
+                          , if f_keep_errors then [ty_err]
+                            else (report:additional_constraints)
+                          , [])
     _ -> wontSolve ct
 
 -- Changes a ~ B c into Coercible a (B c) if Promote (B _)
 solvePromote :: Flags -> PluginTyCons -> Ct -> TcPluginM Solution
 solvePromote Flags{..} _  ct  | f_no_promote = wontSolve ct
-solvePromote Flags{..} PTC{..} ct =
+solvePromote Flags{..} ptc@PTC{..} ct =
    case splitTyConApp_maybe (ctPred ct) of
       Just r@(tyCon, args@[k1,k2,ty1,ty2]) | getUnique tyCon == eqPrimTyConKey
                                              && k1 `eqType` k2 -> do
        res <- matchFam ptc_promote [ty1, ty2]
        case res of
-         Just (_, rhs) ->
-           case splitTyConApp_maybe rhs of
-            --  Just (tc, [constraint, msg]) | tc == ptc_only_if ->
-            --    pprPanic "oi" $ ppr constraint
-             _ ->
-               do let msg = rhs
-                      ty_err = newTyErr ct msg
-                      eq_ty = mkPrimEqPredRole Representational ty1 ty2
-                  report <- newReport ptc_report ct msg
-                  check_coerce <- mkDerived (bumpCtLocDepth $ ctLoc ct) eq_ty
-                  return $ Right ( Just (mkProof "grit-promoteable" ty1 ty2, ct)
-                                 , if f_keep_errors then [ty_err]
-                                   else [check_coerce, report]
-                                 , [])
+         Just (_, rhs) -> do
+            let ty_err = newTyErr ct rhs
+                eq_ty = mkPrimEqPredRole Representational ty1 ty2
+            report <- newReport ptc_report ct rhs
+            check_coerce <- mkWanted (bumpCtLocDepth $ ctLoc ct) eq_ty
+            additional_constraints <- additionalConstraints ptc (ctLoc ct) rhs
+            return $ Right (Just (mkProof "grit-promoteable" ty1 ty2, ct)
+                           , if f_keep_errors then [ty_err]
+                            else [check_coerce, report] ++ additional_constraints
+                           , [])
          _ -> wontSolve ct
       _ -> wontSolve ct
+
+additionalConstraints :: PluginTyCons -> CtLoc -> Type -> TcPluginM [Ct]
+additionalConstraints PTC{..} loc ty =
+  case splitTyConApp_maybe ty of
+    Just (tc, [constraint, _]) | tc == ptc_only_if ->
+      pure <$> mkWanted (bumpCtLocDepth loc) constraint
+    _ -> return []
 
 -- Solve Report is our way of computing whatever type familes that might be in
 -- a given type error before emitting it as a warning or error depending on
