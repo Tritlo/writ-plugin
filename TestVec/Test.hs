@@ -12,7 +12,7 @@
 {-# LANGUAGE TypeOperators #-}
 {-# LANGUAGE TypeApplications #-}
 {-# LANGUAGE ScopedTypeVariables #-}
-{-# LANGUAGE Safe #-}
+{-# LANGUAGE RoleAnnotations #-}
 module Main (main) where
 
 import GRIT.Configure
@@ -28,26 +28,10 @@ type instance Default Length = Unknown
 
 -- Then we define length indexed vectors in the following way:
 newtype Vec (n :: Length) a = Vec [a] deriving (Show)
-
-class IsUnknownOrZero (length :: Length)
-
-instance IsUnknownOrZero Unknown where
-
-instance IsUnknownOrZero (AtLeast 0) where
-
-instance
-  (Report (TypeError (
-         Text "Cannot safely promote a list to a 'Vec length' unless the"
-         :$$: Text "desired length is 0 or Unknown, but here the length is "
-         :<>: ShowType n :<>: Text ".")), 1 <= n) =>
-   IsUnknownOrZero (AtLeast n) where
-
-type instance Discharge Unknown (n :: Length) =
-    OnlyIf (n ~ AtLeast 0) (TypeError (Text "All unknowns lengths are at least 0"))
+type role Vec nominal nominal
 
 -- We also know that is it safe to treat list as vectors with an unknown length.
-type instance Promote [a] (Vec length a) =
-    OnlyIf (IsUnknownOrZero length)
+type instance Promote [a] (Vec Unknown a) =
      (TypeError (Text "Automatic promotion of '"
                  :<>: ShowType [a] :<>: Text "' to a '"
                  :<>: ShowType (Vec Unknown a) :<>: Text "'!"))
@@ -108,6 +92,20 @@ knownVec = fromKnownList [1,2,3]
 vmap :: (a -> b) -> Vec l a -> Vec l b
 vmap = map
 
+
+class (l :: Length) >= (n :: Nat) where
+
+safe2H :: length >= 2 => Vec length a -> (a,a)
+safe2H (Vec (a:b:_)) = (a,b)
+
+type instance Ignore (AtLeast n >= m) =
+  OnlyIf (m <= n) (Notify (Text "AtLeast " :<>: ShowType m
+                           :<>: Text " is at least "
+                           :<>: ShowType n))
+
+forget :: Vec l a -> Vec Unknown a
+forget a = a
+
 main :: IO ()
 main = do print "Enter a list of numbers!"
           -- Note that this is almost like deriving Read (Vec Unknown a) via Read a
@@ -122,8 +120,17 @@ main = do print "Enter a list of numbers!"
           -- print $ safeTail $ safeTail (2>:xs)
           -- Pattern matching works if we can promote to any length,
           -- but not if we only promote to Unknown
-          case (2>:xs) of
-              (2:[]) -> print "Rest was empty"
-              _ -> print "Rest was something else"
+          let n1 = True>:nil
+              n2 = True>:False>:nil
+              n4 = True>:True>:False>:False>:nil
+          print (safe2H n2)
+          print (safe2H n4)
+          -- Note that since we can only promote to Vec Unknown, we must forget
+          -- in order to case match.
+          case forget n2 of
+            [True, False] -> print "matched!"
+            _ -> print "didn't match"
+          -- print (safeHead (nil @Int))
+          -- print (safeHead ([] @Int))
 
 

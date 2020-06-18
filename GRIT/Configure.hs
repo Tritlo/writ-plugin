@@ -2,20 +2,23 @@
 {-# LANGUAGE PolyKinds #-}
 {-# LANGUAGE ConstraintKinds #-}
 {-# LANGUAGE TypeFamilies #-}
+{-# LANGUAGE UndecidableInstances #-}
 module GRIT.Configure (
         Default, Promote, Ignore, Discharge,
-        Report, Message, OnlyIf,
+        Report, Message, Notify, OnlyIf,
         TypeError(..), ErrorMessage(..),
 ) where
 
 import GHC.TypeLits (TypeError(..),ErrorMessage(..))
-
-import GHC.TypeLits (ErrorMessage)
 import Data.Kind (Constraint)
 
--- We give ErrorMessage a new name to reflect that they can also appear in
--- warnings when using GRIT
+-- We give the new name Notify to reflect that they can also appear in
+-- warnings when using GRIT, and the same with ErrorMessage.
+
 type Message = ErrorMessage
+type family Notify (m :: Message) :: Message where
+  Notify m = TypeError m
+
 
 -- Default means that if we have an ambiguous l1 of kind k, we can default it to
 -- be the rhs, i.e. type family Default Label = L would default all
@@ -36,8 +39,8 @@ type family Promote (a :: *) (k :: *) :: Message
 
 -- OnlyIf can be used to communicate additional constraints on promotions,
 -- discharges, and ignores. 
-type family OnlyIf (c :: Constraint) (m :: Message) :: Message
-type instance OnlyIf k m = m
+type family OnlyIf (c :: Constraint) (m :: Message) :: Message where
+  OnlyIf k m = m
 
 -- Report is a class we use to wrap TypeErrors so that any type families
 -- within can be computed. It can be used with a TypeError to turn that error
