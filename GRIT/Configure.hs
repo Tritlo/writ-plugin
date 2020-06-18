@@ -4,7 +4,7 @@
 {-# LANGUAGE TypeFamilies #-}
 module GRIT.Configure (
         Default, Promote, Ignore, Relate,
-        TypeError(..), ErrorMessage(..), Message
+        TypeError(..), ErrorMessage(..), Message, OnlyIf
 ) where
 
 import GHC.TypeLits (TypeError(..),ErrorMessage(..))
@@ -25,12 +25,19 @@ type family Default k :: k
 -- Note that Promote a k requires Coercible a k, otherwise a Coercible error  will be produced.
 type family Promote (a :: *) (k :: *) :: Message
 
+-- You can use OnlyIf to communicate additional constraints on promotions and
+-- relations.
+type family OnlyIf (c :: Constraint) (m :: Message) :: Message
+type instance OnlyIf k m = m
+
 -- An Ignore cons means that we are allowd to ignore the constraint con.
 -- Note! This only works for empty classes!
 type family Ignore (k :: Constraint) :: Message
 
--- Relate means that we are allowed to discharge (a :: k) ~ (b :: k)
-type family Relate k (a :: k) (b :: k) :: Message
+-- Relate means that we are allowed to discharge (a :: k) ~ (b :: k),
+-- if c holds.
+type family Relate (a :: k) (b :: k) :: Message
+
 
 -- Report is a class we use to wrap TypeErrors so that any type families
 -- within can be computed. It's closed, so we know that the only instances of

@@ -1,4 +1,6 @@
-{-# OPTIONS_GHC -fplugin GRIT.Plugin -dcore-lint #-}
+{-# OPTIONS_GHC -fplugin GRIT.Plugin
+                -fplugin-opt=GRIT.Plugin:debug
+                -dcore-lint #-}
 -- Plugin:
 {-# LANGUAGE DataKinds #-}
 {-# LANGUAGE FlexibleInstances #-}
@@ -23,7 +25,7 @@ type instance Default Label = L
 -- between two of the types. You can either specify the types to match
 -- directly (e.g. Relate Label L H), or use variables. If you use the variables,
 -- you can further compute to e.g. pretty print the labels.
-type instance Relate Label (n :: Label) (m :: Label) =
+type instance Relate (n :: Label) (m :: Label) =
     TypeError (Text "Forbidden flow from " :<>: LabelPpr (Max n m)
                :<>: Text " to " :<>: LabelPpr (Min n m) :<>: Text "!")
 
@@ -42,16 +44,17 @@ type instance Ignore (Less n m) =
 -- Promotable (F H _) will change any (a ~ F H b) into Coercible a (F H b), but
 -- only when the label is H. Can also be written as (F _ _), if it should apply
 -- to all labels.
-type instance Promote a (F H b) =
-     TypeError (Text "Automatic promotion of unlabeled '"
-                :<>: ShowType a :<>: Text "' to a Secret '"
-                :<>: ShowType b :<>: Text "'!"
-                :$$: Text "Perhaps you intended to use 'box'?")
-type instance Promote a (F L b) =
-     TypeError (Text "Automatic promotion of unlabeled '"
-                :<>: ShowType a :<>: Text "' to a Public '"
-                :<>: ShowType b :<>: Text "'!"
-                :$$: Text "Perhaps you intended to use 'box'?")
+-- type instance Promote _ a (F H b) =
+--      TypeError (Text "Automatic promotion of unlabeled '"
+--                 :<>: ShowType a :<>: Text "' to a Secret '"
+--                 :<>: ShowType b :<>: Text "'!"
+--                 :$$: Text "Perhaps you intended to use 'box'?")
+type instance Promote a (F l b) =
+     OnlyIf (Less H l, l ~ H)
+      (TypeError (Text "Automatic promotion of unlabeled '"
+                  :<>: ShowType a :<>: Text "' to a Public '"
+                  :<>: ShowType b :<>: Text "'!"
+                  :$$: Text "Perhaps you intended to use 'box'?"))
 
 newtype F (l :: Label) a = MkF {unF :: a} deriving (Show)
 
@@ -106,8 +109,8 @@ main = do print "hello!"
           -- Not that we are turning this into a coercion, so that if
           -- Int is coercible to Age, the promotion works.
           print ((1 :: Int) :: F L Age)
-          -- If you have an unspecified type variable that can be defaulted, you
-          -- can also promote.
+        --   If you have an unspecified type variable that can be defaulted, you
+        --   can also promote.
           print ((1 :: Int) :: F l Age)
           let labeledMaybe :: F l (Maybe Bool)
               labeledMaybe = Just True

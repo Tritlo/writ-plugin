@@ -36,8 +36,6 @@ type instance Promote [a] (Vec Unknown a) =
                 :<>: ShowType (Vec Unknown a) :<>: Text "'!")
 
 
-type instance Relate Length (AtLeast _) Unknown = TypeError (Text "Making Unknown")
-
 -- Now we can define a safe head function, that only works if we know the length
 -- of the list, and the length is at least one.
 safeHead :: (length ~ AtLeast n, 1 <= n) => Vec length a -> a
@@ -95,8 +93,10 @@ main = do print "Enter a list of numbers!"
           print $ safeTail (2>:xs)
           -- Does not compile, since the length of xs is unknown
           -- print $ safeTail $ safeTail (2>:xs)
-          case (2>:xs) of
-              Vec (2:[]) -> print "Rest was empty"
-              _ -> print "Rest was something else"
+          -- Pattern matching works if we can promote to any length,
+          -- but not if we only promote to Unknown
+        --   case (2>:xs) of
+        --       (2:[]) -> print "Rest was empty"
+        --       _ -> print "Rest was something else"
 
 

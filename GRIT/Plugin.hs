@@ -7,7 +7,7 @@ module GRIT.Plugin ( plugin, module GRIT.Configure ) where
 
 import GRIT.Configure
 
-import Control.Monad (when, guard, foldM, zipWithM)
+import Control.Monad (when, guard, foldM, zipWithM, msum)
 import Data.Maybe (mapMaybe, catMaybes, fromMaybe, fromJust, listToMaybe, isJust)
 import Data.Either
 import Data.IORef
@@ -29,7 +29,6 @@ import GHC.Tc.Types.Constraint
 import GHC.Tc.Utils.TcMType (fillCoercionHole)
 
 
-import GHC.Core.FamInstEnv
 import GHC.Core.TyCo.Rep
 import GHC.Core.Predicate
 import GHC.Core.Class
@@ -47,7 +46,6 @@ import TcPluginM
 import ErrUtils (Severity(SevWarning))
 import TcEvidence
 
-import FamInstEnv
 
 import TysPrim
 import PrelNames
@@ -177,12 +175,11 @@ gritPlugin opts = TcPlugin initialize solve stop
         ; mapM_ (pprDebug "Given:") given
         ; mapM_ (pprDebug "Derived:") derived
         ; mapM_ (pprDebug "Wanted:") wanted
-        ; instEnvs <- getFamInstEnvs
         ; pluginTyCons <- getPluginTyCons
         ; let solveWFun (unsolved, (solved, more, logs)) (solveFun, explain) =
                 do  {(still_unsolved, (new_solved, new_more, new_logs)) <-
                          inspectSol <$>
-                            mapM (solveFun flags instEnvs pluginTyCons) unsolved
+                            mapM (solveFun flags pluginTyCons) unsolved
                     ; mapM_ (pprDebug (explain ++ "-sols")) new_solved
                     ; mapM_ (pprDebug (explain ++ "-more")) new_more
                     ; mapM_ (pprDebug (explain ++ "-reps") . pprRep) new_more
@@ -207,6 +204,7 @@ gritPlugin opts = TcPlugin initialize solve stop
 
 data PluginTyCons = PTC { ptc_default :: TyCon
                         , ptc_promote :: TyCon
+                        , ptc_only_if :: TyCon
                         , ptc_ignore  :: TyCon
                         , ptc_relate  :: TyCon
                         , ptc_report  :: TyCon }
@@ -221,6 +219,7 @@ getPluginTyCons =
                 ptc_promote <- getTyCon mod "Promote"
                 ptc_ignore  <- getTyCon mod "Ignore"
                 ptc_report  <- getTyCon mod "Report"
+                ptc_only_if <- getTyCon mod "OnlyIf"
                 return PTC{..}
          NoPackage uid -> pprPanic "Plugin module not found (no package)!" (ppr uid)
          FoundMultiple ms -> pprPanic "Multiple plugin modules found!" (ppr ms)
@@ -246,11 +245,13 @@ pprRep ct =
 
 
 -- Defaults any ambiguous type variables of kind k to l if Default k = l
-solveDefault :: Flags -> FamInstEnvs -> PluginTyCons -> Ct -> TcPluginM Solution
-solveDefault Flags{..} _ _ ct | f_no_default = wontSolve ct
-solveDefault Flags{..} famInsts PTC{..} ct
-   | null defaults = wontSolve ct
-   | otherwise =
+solveDefault :: Flags -> PluginTyCons -> Ct -> TcPluginM Solution
+solveDefault Flags{..} _ ct | f_no_default = wontSolve ct
+solveDefault Flags{..} PTC{..} ct =
+  do defaults <- catMaybes <$> mapM getDefault (tyCoVarsOfCtList ct)
+     if null defaults
+     then wontSolve ct
+     else
       -- We make assertions that `a ~ def` for all free a in pred_ty of ct. and
       -- add these as new assertions. For meta type variables (i.e. ones that
       -- have been instantiated with a `forall`, e.g. `forall a. Less H a`), an
@@ -263,17 +264,17 @@ solveDefault Flags{..} famInsts PTC{..} ct
       -- change the type of `True :: F a Bool` to `True :: a ~ L => F a Bool`.
       -- Note that we cannot simply emit a given for both, since we cannot
       -- mention a meta type variable in a given.
-      do assert_eqs <- mapM mkAssert eq_tys
+      do let (eq_tys, logs) = unzip $ map mkTyEq defaults
+         assert_eqs <- mapM mkAssert eq_tys
          return $ Right (Nothing, assert_eqs, if f_quiet then [] else logs)
-   where defaults = mapMaybe getDefault $ tyCoVarsOfCtList ct
-         (eq_tys, logs) = unzip $ map mkTyEq defaults
-         mkAssert :: Either PredType (Type, EvExpr) -> TcPluginM Ct
+   where mkAssert :: Either PredType (Type, EvExpr) -> TcPluginM Ct
          mkAssert = either (mkDerived bump) (uncurry (mkGiven bump))
          bump = bumpCtLocDepth $ ctLoc ct
-         getDefault var =
-           case lookupFamInstEnv famInsts ptc_default [varType var] of
-             [FamInstMatch{fim_instance=FamInst{..}}] -> Just (var, fi_rhs)
-             _ -> Nothing
+         getDefault var = do
+           res <- matchFam ptc_default [varType var]
+           case res of
+             Just (_, ty) -> return $ Just (var, ty)
+             _ -> return $ Nothing
          mkTyEq (var,def) = ( if isMetaTyVar var
                               then Left pred_ty
                               else Right (pred_ty, proof),
@@ -284,74 +285,72 @@ solveDefault Flags{..} famInsts PTC{..} ct
                  pred_ty = mkPrimEqPredRole Nominal (mkTyVarTy var) def
 
 -- Solves con :: Constraint if Ignore con
-solveIgnore :: Flags -> FamInstEnvs -> PluginTyCons -> Ct -> TcPluginM Solution
-solveIgnore Flags{..} _ _ ct | f_no_ignore = wontSolve ct
-solveIgnore Flags{..} famInsts PTC{..} ct@CDictCan{..} =
-   case lookupFamInstEnv famInsts ptc_ignore [ctPred ct] of
-      [] -> wontSolve ct
-      _ | not (null $ classMethods cc_class) -> wontSolve ct
-      [FamInstMatch {fim_instance=FamInst{..},..}] ->
-            do let msg = substTyWith fi_tvs fim_tys fi_rhs
-                   ty_err = newTyErr ct msg
-                   classCon = tyConSingleDataCon (classTyCon cc_class)
-               report <- newReport ptc_report ct msg
-               return $ Right ( Just (evDataConApp classCon cc_tyargs [], ct)
-                              , if f_keep_errors
-                                then [ty_err]
-                                else [report]
-                              , [])
-solveIgnore _ _ _ ct = wontSolve ct
+solveIgnore :: Flags -> PluginTyCons -> Ct -> TcPluginM Solution
+solveIgnore Flags{..} _ ct | f_no_ignore = wontSolve ct
+solveIgnore _ _ ct@CDictCan{..} | not (null $ classMethods cc_class) = wontSolve ct
+solveIgnore Flags{..} PTC{..} ct@CDictCan{..} = do
+  res <- matchFam ptc_ignore [ctPred ct]
+  case res of
+    Nothing -> wontSolve ct
+    Just (_, msg) ->
+       do let ty_err = newTyErr ct msg
+              classCon = tyConSingleDataCon (classTyCon cc_class)
+          report <- newReport ptc_report ct msg
+          return $ Right ( Just (evDataConApp classCon cc_tyargs [], ct)
+                         , if f_keep_errors then [ty_err] else [report]
+                         , [])
+solveIgnore _ _ ct = wontSolve ct
 
 
 -- Solves (a :: k) ~ (b :: k) if Relate k a b or Relate k b a
-solveRelate :: Flags -> FamInstEnvs -> PluginTyCons -> Ct -> TcPluginM Solution
-solveRelate Flags{..} _ _ ct | f_no_relate = wontSolve ct
-solveRelate Flags{..} famInsts PTC{..} ct =
+solveRelate :: Flags -> PluginTyCons -> Ct -> TcPluginM Solution
+solveRelate Flags{..} _ ct | f_no_relate = wontSolve ct
+solveRelate Flags{..} PTC{..} ct =
   case splitTyConApp_maybe (ctPred ct) of
-    Just (tyCon, [k1,k2,ty1,ty2]) | isEqPrimPred (ctPred ct)
-                                    && k1 `eqType` k2 ->
-      case lookupFamInstEnv famInsts ptc_relate [k1, ty1, ty2]
-        -- ++ lookupFamInstEnv famInsts ptc_relate [k1, ty2, ty1]
-        of
-         [] -> wontSolve ct
-         (FamInstMatch {fim_instance=FamInst{..}, ..}:_) ->
-           do let msg = substTyWith fi_tvs fim_tys fi_rhs
-                  ty_err = newTyErr ct msg
-              report <- newReport ptc_report ct msg
-              return $ Right (Just (mkProof "grit-relateable" ty1 ty2, ct)
-                             , if f_keep_errors
-                               then [ty_err]
-                               else [report]
-                             , [])
+    Just (tyCon, [k1,k2,ty1,ty2]) | isEqPrimPred (ctPred ct) ->
+      do res <- msum <$> mapM (matchFam ptc_relate) [[k1,ty1,ty2],[k1,ty2,ty1]]
+         case res of
+           Nothing -> wontSolve ct
+           Just (_, rhs) ->
+             do let msg = rhs
+                    ty_err = newTyErr ct msg
+                report <- newReport ptc_report ct msg
+                return $ Right (Just (mkProof "grit-relateable" ty1 ty2, ct)
+                              , if f_keep_errors then [ty_err] else [report]
+                              , [])
     _ -> wontSolve ct
 
 -- Changes a ~ B c into Coercible a (B c) if Promote (B _)
-solvePromote :: Flags -> FamInstEnvs -> PluginTyCons -> Ct -> TcPluginM Solution
-solvePromote Flags{..} _ _  ct  | f_no_promote = wontSolve ct
-solvePromote Flags{..} famInsts PTC{..} ct =
+solvePromote :: Flags -> PluginTyCons -> Ct -> TcPluginM Solution
+solvePromote Flags{..} _  ct  | f_no_promote = wontSolve ct
+solvePromote Flags{..} PTC{..} ct =
    case splitTyConApp_maybe (ctPred ct) of
       Just r@(tyCon, args@[k1,k2,ty1,ty2]) | getUnique tyCon == eqPrimTyConKey
-                                             && k1 `eqType` k2 ->
-        case lookupFamInstEnv famInsts ptc_promote [ty1, ty2] of
-           [] -> wontSolve ct
-           [FamInstMatch {fim_instance=FamInst{..}, ..}] ->
-             do let msg = substTyWith fi_tvs fim_tys fi_rhs
-                    ty_err = newTyErr ct msg
-                    eq_ty = mkPrimEqPredRole Representational ty1 ty2
-                report <- newReport ptc_report ct msg
-                check_coerce <- mkDerived (bumpCtLocDepth $ ctLoc ct) eq_ty
-                return $ Right ( Just (mkProof "grit-promoteable" ty1 ty2, ct)
-                               , if f_keep_errors
-                                 then [ty_err]
-                                 else [check_coerce, report]
-                               , [])
+                                             && k1 `eqType` k2 -> do
+       res <- matchFam ptc_promote [ty1, ty2]
+       case res of
+         Just (_, rhs) ->
+           case splitTyConApp_maybe rhs of
+            --  Just (tc, [constraint, msg]) | tc == ptc_only_if ->
+            --    pprPanic "oi" $ ppr constraint
+             _ ->
+               do let msg = rhs
+                      ty_err = newTyErr ct msg
+                      eq_ty = mkPrimEqPredRole Representational ty1 ty2
+                  report <- newReport ptc_report ct msg
+                  check_coerce <- mkDerived (bumpCtLocDepth $ ctLoc ct) eq_ty
+                  return $ Right ( Just (mkProof "grit-promoteable" ty1 ty2, ct)
+                                 , if f_keep_errors then [ty_err]
+                                   else [check_coerce, report]
+                                 , [])
+         _ -> wontSolve ct
       _ -> wontSolve ct
 
 -- Solve Report is our way of computing whatever type familes that might be in
 -- a given type error before emitting it as a warning or error depending on
 -- which flags are set.
-solveReport :: Flags -> FamInstEnvs -> PluginTyCons -> Ct -> TcPluginM Solution
-solveReport Flags{..} envs PTC{..} ct =
+solveReport :: Flags -> PluginTyCons -> Ct -> TcPluginM Solution
+solveReport Flags{..} PTC{..} ct =
    case splitTyConApp_maybe (ctPred ct) of
       Just r@(tyCon, [msg]) | getName tyCon == getName ptc_report -> do
         let ev = Just (evDataConApp (tyConSingleDataCon tyCon) [msg] [], ct)
