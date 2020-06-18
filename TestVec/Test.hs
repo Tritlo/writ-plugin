@@ -29,12 +29,28 @@ type instance Default Length = Unknown
 -- Then we define length indexed vectors in the following way:
 newtype Vec (n :: Length) a = Vec [a] deriving (Show)
 
--- We also know that is it safe to treat list as vectors with an unknown length.
-type instance Promote [a] (Vec Unknown a) =
-     TypeError (Text "Automatic promotion of '"
-                :<>: ShowType [a] :<>: Text "' to a '"
-                :<>: ShowType (Vec Unknown a) :<>: Text "'!")
+class IsUnknownOrZero (length :: Length)
 
+instance IsUnknownOrZero Unknown where
+
+instance IsUnknownOrZero (AtLeast 0) where
+
+instance
+  (Report (TypeError (
+         Text "Cannot safely promote a list to a 'Vec length' unless the"
+         :$$: Text "desired length is 0 or Unknown, but here the length is "
+         :<>: ShowType n :<>: Text ".")), 1 <= n) =>
+   IsUnknownOrZero (AtLeast n) where
+
+type instance Relate Unknown (n :: Length) =
+    OnlyIf (n ~ AtLeast 0) (TypeError (Text "All unknowns lengths are at least 0"))
+
+-- We also know that is it safe to treat list as vectors with an unknown length.
+type instance Promote [a] (Vec length a) =
+    OnlyIf (IsUnknownOrZero length)
+     (TypeError (Text "Automatic promotion of '"
+                 :<>: ShowType [a] :<>: Text "' to a '"
+                 :<>: ShowType (Vec Unknown a) :<>: Text "'!"))
 
 -- Now we can define a safe head function, that only works if we know the length
 -- of the list, and the length is at least one.
@@ -59,7 +75,6 @@ type family Inc (k :: Length) :: Length where
 (>:) :: a -> Vec length a -> Vec (Inc length) a
 a>:(Vec as) = Vec (a:as)
 infixr 3 >:
-
 
 type family Add (l1 :: Length) (l2 :: Length) :: Length where
     Add (AtLeast n) (AtLeast m) = AtLeast (n+m)
@@ -95,8 +110,8 @@ main = do print "Enter a list of numbers!"
           -- print $ safeTail $ safeTail (2>:xs)
           -- Pattern matching works if we can promote to any length,
           -- but not if we only promote to Unknown
-        --   case (2>:xs) of
-        --       (2:[]) -> print "Rest was empty"
-        --       _ -> print "Rest was something else"
+          case (2>:xs) of
+              (2:[]) -> print "Rest was empty"
+              _ -> print "Rest was something else"
 
 

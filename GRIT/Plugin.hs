@@ -247,7 +247,7 @@ pprRep ct =
 -- Defaults any ambiguous type variables of kind k to l if Default k = l
 solveDefault :: Flags -> PluginTyCons -> Ct -> TcPluginM Solution
 solveDefault Flags{..} _ ct | f_no_default = wontSolve ct
-solveDefault Flags{..} PTC{..} ct =
+solveDefault Flags{..} ptc@PTC{..} ct =
   do defaults <- catMaybes <$> mapM getDefault (tyCoVarsOfCtList ct)
      if null defaults
      then wontSolve ct
@@ -264,23 +264,30 @@ solveDefault Flags{..} PTC{..} ct =
       -- change the type of `True :: F a Bool` to `True :: a ~ L => F a Bool`.
       -- Note that we cannot simply emit a given for both, since we cannot
       -- mention a meta type variable in a given.
-      do let (eq_tys, logs) = unzip $ map mkTyEq defaults
+      do (eq_tys, cts, logs) <- unzip3 <$> mapM mkTyEq defaults
          assert_eqs <- mapM mkAssert eq_tys
-         return $ Right (Nothing, assert_eqs, if f_quiet then [] else logs)
+         return $ Right ( Nothing
+                        , assert_eqs ++ (concat cts)
+                        , if f_quiet then [] else logs)
    where mkAssert :: Either PredType (Type, EvExpr) -> TcPluginM Ct
          mkAssert = either (mkDerived bump) (uncurry (mkGiven bump))
          bump = bumpCtLocDepth $ ctLoc ct
          getDefault var = do
            res <- matchFam ptc_default [varType var]
            case res of
-             Just (_, ty) -> return $ Just (var, ty)
+             Just (_, rhs) -> return $ Just (var, rhs)
              _ -> return $ Nothing
-         mkTyEq (var,def) = ( if isMetaTyVar var
-                              then Left pred_ty
-                              else Right (pred_ty, proof),
-                              LogDefault{log_pred_ty = ctPred ct,
-                                         log_var = var, log_kind = varType var,
-                                         log_res = def, log_loc =ctLoc ct})
+         mkTyEq (var,def) = do
+            -- We check for additional constraints here, even though they are
+            -- currently not expressible.
+            additional_constraints <- additionalConstraints ptc (ctLoc ct) def
+            return $ ( if isMetaTyVar var
+                       then Left pred_ty
+                       else Right (pred_ty, proof),
+                       additional_constraints,
+                       LogDefault{log_pred_ty = ctPred ct,
+                                  log_var = var, log_kind = varType var,
+                                  log_res = def, log_loc =ctLoc ct})
            where EvExpr proof = mkProof "solve-defaultable" (mkTyVarTy var) def
                  pred_ty = mkPrimEqPredRole Nominal (mkTyVarTy var) def
 
@@ -345,10 +352,12 @@ solvePromote Flags{..} ptc@PTC{..} ct =
          _ -> wontSolve ct
       _ -> wontSolve ct
 
+-- Additional constraints allow users to specify additional constraints for
+-- promotions and relations.
 additionalConstraints :: PluginTyCons -> CtLoc -> Type -> TcPluginM [Ct]
 additionalConstraints PTC{..} loc ty =
   case splitTyConApp_maybe ty of
-    Just (tc, [constraint, _]) | tc == ptc_only_if ->
+    Just (tc, (constraint:_)) | tc == ptc_only_if ->
       pure <$> mkWanted (bumpCtLocDepth loc) constraint
     _ -> return []
 

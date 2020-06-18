@@ -19,7 +19,7 @@ data Label = L | H deriving (Show)
 
 -- By giving the kind Label a Default instance, any ambiguous type variables
 -- oft the kind Label will be defaulted to L
-type instance Default Label = L
+type instance Default Label = H
 
 -- You can also give the kind the Relate instance, which allows equality
 -- between two of the types. You can either specify the types to match

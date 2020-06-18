@@ -4,7 +4,8 @@
 {-# LANGUAGE TypeFamilies #-}
 module GRIT.Configure (
         Default, Promote, Ignore, Relate,
-        TypeError(..), ErrorMessage(..), Message, OnlyIf
+        Report, Message, OnlyIf,
+        TypeError(..), ErrorMessage(..),
 ) where
 
 import GHC.TypeLits (TypeError(..),ErrorMessage(..))
@@ -26,7 +27,8 @@ type family Default k :: k
 type family Promote (a :: *) (k :: *) :: Message
 
 -- You can use OnlyIf to communicate additional constraints on promotions and
--- relations.
+-- relations and ignores. k is usually Message here, but we leave the kind open
+-- in case you want to have constraints on defaults.
 type family OnlyIf (c :: Constraint) (m :: Message) :: Message
 type instance OnlyIf k m = m
 
