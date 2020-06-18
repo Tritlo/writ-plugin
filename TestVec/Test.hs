@@ -52,6 +52,11 @@ type instance Promote [a] (Vec length a) =
                  :<>: ShowType [a] :<>: Text "' to a '"
                  :<>: ShowType (Vec Unknown a) :<>: Text "'!"))
 
+type instance Promote (Vec l a) [a] =
+     (TypeError (Text "Automatic promotion of '"
+                 :<>: ShowType (Vec l a) :<>: Text "' to a '"
+                 :<>: ShowType [a] :<>: Text "'!"))
+
 -- Now we can define a safe head function, that only works if we know the length
 -- of the list, and the length is at least one.
 safeHead :: (length ~ AtLeast n, 1 <= n) => Vec length a -> a
@@ -100,12 +105,19 @@ fromKnownList as =
 knownVec :: Vec (AtLeast 3) Int
 knownVec = fromKnownList [1,2,3]
 
+vmap :: (a -> b) -> Vec l a -> Vec l b
+vmap = map
+
 main :: IO ()
 main = do print "Enter a list of numbers!"
           -- Note that this is almost like deriving Read (Vec Unknown a) via Read a
           xs <- read @[Integer]  <$> return "[1,3,5]" -- getLine
           print $ safeHead (7>:xs)
           print $ safeTail (2>:xs)
+          let k = (2>:xs)
+              mk = map (+1) k
+          print mk
+          print (vmap (+1) k)
           -- Does not compile, since the length of xs is unknown
           -- print $ safeTail $ safeTail (2>:xs)
           -- Pattern matching works if we can promote to any length,

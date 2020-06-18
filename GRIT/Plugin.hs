@@ -312,8 +312,9 @@ solveDischarge Flags{..} _ ct | f_no_discharge = wontSolve ct
 solveDischarge Flags{..} ptc@PTC{..} ct =
   case splitTyConApp_maybe (ctPred ct) of
     Just (tyCon, [k1,k2,ty1,ty2]) | isEqPrimPred (ctPred ct) ->
-      do res <- msum <$> mapM (matchFam ptc_discharge) [[k1,ty1,ty2],
-                                                        [k1,ty2,ty1]]
+      do res <- msum <$> mapM (matchFam ptc_discharge) [ [k1,ty1,ty2]
+                                                       --, [k1,ty2,ty1]
+                                                       ]
          case res of
            Nothing -> wontSolve ct
            Just (_, rhs) -> do
