@@ -264,10 +264,10 @@ solveDefault Flags{..} ptc@PTC{..} ct =
       -- change the type of `True :: F a Bool` to `True :: a ~ L => F a Bool`.
       -- Note that we cannot simply emit a given for both, since we cannot
       -- mention a meta type variable in a given.
-      do (eq_tys, cts, logs) <- unzip3 <$> mapM mkTyEq defaults
+      do let (eq_tys, logs) = unzip $ map mkTyEq defaults
          assert_eqs <- mapM mkAssert eq_tys
          return $ Right ( Nothing
-                        , assert_eqs ++ (concat cts)
+                        , assert_eqs
                         , if f_quiet then [] else logs)
    where mkAssert :: Either PredType (Type, EvExpr) -> TcPluginM Ct
          mkAssert = either (mkDerived bump) (uncurry (mkGiven bump))
@@ -277,17 +277,12 @@ solveDefault Flags{..} ptc@PTC{..} ct =
            case res of
              Just (_, rhs) -> return $ Just (var, rhs)
              _ -> return $ Nothing
-         mkTyEq (var,def) = do
-            -- We check for additional constraints here, even though they are
-            -- currently not expressible.
-            additional_constraints <- additionalConstraints ptc (ctLoc ct) def
-            return $ ( if isMetaTyVar var
-                       then Left pred_ty
-                       else Right (pred_ty, proof),
-                       additional_constraints,
-                       LogDefault{log_pred_ty = ctPred ct,
-                                  log_var = var, log_kind = varType var,
-                                  log_res = def, log_loc =ctLoc ct})
+         mkTyEq (var,def) = ( if isMetaTyVar var
+                              then Left pred_ty
+                              else Right (pred_ty, proof),
+                              LogDefault{log_pred_ty = ctPred ct,
+                                         log_var = var, log_kind = varType var,
+                                         log_res = def, log_loc =ctLoc ct})
            where EvExpr proof = mkProof "solve-defaultable" (mkTyVarTy var) def
                  pred_ty = mkPrimEqPredRole Nominal (mkTyVarTy var) def
 
