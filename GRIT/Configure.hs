@@ -13,7 +13,6 @@ import Data.Kind (Constraint)
 -- ambiguous type variables of kind Label to L
 type family Default k :: k
 
-
 -- Promote means that if we have a value (True :: Bool), we can promote it to (k Bool)
 -- Note that Promote a k requires Coercible a k, otherwise a Coercible error  will be produced.
 type family Promote (a :: *) (k :: *) :: ErrorMessage
@@ -22,7 +21,8 @@ type family Promote (a :: *) (k :: *) :: ErrorMessage
 -- Note! This only works for empty classes!
 type family Ignore (k :: Constraint) :: ErrorMessage
 
--- Relate means that we are allowed to discharge (a :: k) ~ (b :: k) and (b :: k) ~ (a :: k).
+-- Relate means that we are allowed to discharge (a :: k) ~ (b :: k)
+-- and (b :: k) ~ (a :: k).
 type family Relate k (a :: k) (b :: k):: ErrorMessage
 
 -- Report is a class we use to wrap TypeErrors so that any type families

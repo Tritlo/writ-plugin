@@ -1,7 +1,4 @@
-{-# OPTIONS_GHC -fplugin GRIT.Plugin
-                -fplugin-opt=GRIT.Plugin:defer
-                -dcore-lint
-                 #-}
+{-# OPTIONS_GHC -fplugin GRIT.Plugin -dcore-lint #-}
 -- Plugin:
 {-# LANGUAGE DataKinds #-}
 {-# LANGUAGE FlexibleInstances #-}
