@@ -1,0 +1,37 @@
+Build profile: -w ghc-8.8.3 -O1
+In order, the following will be built (use -v for more details):
+ - sacred-plugin-0.0.1 (lib) (file SACRED/Plugin.hs changed)
+ - Test-1.0.0 (exe:test) (dependency rebuilt)
+Preprocessing library for sacred-plugin-0.0.1..
+Building library for sacred-plugin-0.0.1..
+[2 of 2] Compiling SACRED.Plugin    ( SACRED/Plugin.hs, /home/tritlo/sacred-plugin/dist-newstyle/build/x86_64-linux/ghc-8.8.3/sacred-plugin-0.0.1/build/SACRED/Plugin.o )
+Preprocessing executable 'test' for Test-1.0.0..
+Building executable 'test' for Test-1.0.0..
+[1 of 1] Compiling Main             ( Test.hs, /home/tritlo/sacred-plugin/dist-newstyle/build/x86_64-linux/ghc-8.8.3/Test-1.0.0/x/test/build/test/test-tmp/Main.o ) [/home/tritlo/sacred-plugin/dist-newstyle/build/x86_64-linux/ghc-8.8.3/sacred-plugin-0.0.1/build/libHSsacred-plugin-0.0.1-inplace.a changed]
+Solving 
+Wanted: [WD] $dShow_a4he {0}:: Show a (CDictCan)
+Solving 
+Given: [G] $dShow_a4Lh {0}:: Show a (CDictCan)
+Given: [*]
+Solving 
+Wanted: [WD] $dShow_a4Lw {0}:: Show a (CDictCan)
+Solving 
+Given: [G] $dShow_a4Ly {0}:: Show a (CDictCan)
+Given: [*]
+Solving 
+Wanted: [WD] hole{co_a515} {0}:: Int ~ F l Age (CIrredCan(insol))
+Defaulting-sols (CO: Univ(nominal plugin "sacred-defaultable"
+          :: Int ~ F l Age, Int ~ F 'L Age),
+ [WD] hole{co_a515} {0}:: Int ~ F l Age (CIrredCan(insol)))
+Defaulting-more [D] _ {1}:: Int ~ F 'L Age (CNonCanonical)
+Defaulting-more [D] _ {1}:: l ~ 'L (CNonCanonical)
+Defaulting-logs Defaulting ‘l :: Label’ to ‘'L’ in ‘Int ~ F l Age’!
+Solving 
+Derived: [D] _ {1}:: Int ~ F 'L Age (CIrredCan(insol))
+Derived: [D] _ {1}:: l ~ 'L (CNonCanonical)
+Solving 
+Given: [G] $dShow_a51F {0}:: Show a (CDictCan)
+Given: [*]
+Linking /home/tritlo/sacred-plugin/dist-newstyle/build/x86_64-linux/ghc-8.8.3/Test-1.0.0/x/test/build/test/test ...
+"hello!"
+MkF {unF = MkAge 1}

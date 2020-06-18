@@ -311,7 +311,8 @@ solveRelate Flags{..} famInsts PTC{..} ct =
     Just (tyCon, [k1,k2,ty1,ty2]) | isEqPrimPred (ctPred ct)
                                     && k1 `eqType` k2 ->
       case lookupFamInstEnv famInsts ptc_relate [k1, ty1, ty2]
-        ++ lookupFamInstEnv famInsts ptc_relate [k1, ty2, ty1] of
+        -- ++ lookupFamInstEnv famInsts ptc_relate [k1, ty2, ty1]
+        of
          [] -> wontSolve ct
          (FamInstMatch {fim_instance=FamInst{..}, ..}:_) ->
            do let msg = substTyWith fi_tvs fim_tys fi_rhs

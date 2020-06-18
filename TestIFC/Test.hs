@@ -8,12 +8,10 @@
 {-# LANGUAGE PolyKinds #-}
 {-# LANGUAGE UndecidableInstances #-}
 {-# LANGUAGE TypeOperators #-}
-{-# LANGUAGE RoleAnnotations #-}
 module Main (main) where
 
 
-import GRIT.Configure (Default, Promote, Ignore, Relate)
-import GHC.TypeLits (TypeError(..),ErrorMessage(..))
+import GRIT.Configure
 
 data Label = L | H deriving (Show)
 
