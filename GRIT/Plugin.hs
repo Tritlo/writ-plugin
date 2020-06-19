@@ -276,7 +276,7 @@ solveDefault Flags{..} ptc@PTC{..} ct =
            res <- matchFam ptc_default [varType var]
            case res of
              Just (_, rhs) -> return $ Just (var, rhs)
-             _ -> return $ Nothing
+             _ -> return Nothing
          mkTyEq (var,def) = ( if isMetaTyVar var
                               then Left pred_ty
                               else Right (pred_ty, proof),
@@ -301,7 +301,7 @@ solveIgnore Flags{..} ptc@PTC{..} ct@CDictCan{..} = do
           additional_constraints <- additionalConstraints ptc (ctLoc ct) rhs
           return $ Right ( Just (evDataConApp classCon cc_tyargs [], ct)
                          , if f_keep_errors then [ty_err]
-                           else (report:additional_constraints)
+                           else report:additional_constraints
                          , [])
 solveIgnore _ _ ct = wontSolve ct
 
@@ -312,9 +312,7 @@ solveDischarge Flags{..} _ ct | f_no_discharge = wontSolve ct
 solveDischarge Flags{..} ptc@PTC{..} ct =
   case splitTyConApp_maybe (ctPred ct) of
     Just (tyCon, [k1,k2,ty1,ty2]) | isEqPrimPred (ctPred ct) ->
-      do res <- msum <$> mapM (matchFam ptc_discharge) [ [k1,ty1,ty2]
-                                                       --, [k1,ty2,ty1]
-                                                       ]
+      do res <- matchFam ptc_discharge [k1,ty1,ty2]
          case res of
            Nothing -> wontSolve ct
            Just (_, rhs) -> do
@@ -323,7 +321,7 @@ solveDischarge Flags{..} ptc@PTC{..} ct =
             additional_constraints <- additionalConstraints ptc (ctLoc ct) rhs
             return $ Right (Just (mkProof "grit-dischargeable" ty1 ty2, ct)
                           , if f_keep_errors then [ty_err]
-                            else (report:additional_constraints)
+                            else report:additional_constraints
                           , [])
     _ -> wontSolve ct
 
@@ -354,7 +352,7 @@ solvePromote Flags{..} ptc@PTC{..} ct =
 additionalConstraints :: PluginTyCons -> CtLoc -> Type -> TcPluginM [Ct]
 additionalConstraints PTC{..} loc ty =
   case splitTyConApp_maybe ty of
-    Just (tc, (constraint:_)) | tc == ptc_only_if ->
+    Just (tc, constraint:_) | tc == ptc_only_if ->
       pure <$> mkWanted (bumpCtLocDepth loc) constraint
     _ -> return []
 
@@ -390,7 +388,7 @@ tryImproveTyErr msg =
     improve' arg = do
        (tc, args) <- splitTyConApp_maybe arg
        let name = tyConName tc
-       guard (all (name /=) [typeErrorTextDataConName, typeErrorShowTypeDataConName])
+       guard (name `notElem` [typeErrorTextDataConName, typeErrorShowTypeDataConName])
        if name `elem` splitTcs
        then let [t1, t2] = args
             in mkTyConApp tc <$> case (improve' t1, improve' t2) of
@@ -425,7 +423,7 @@ mkGiven loc eq_ty ev = flip setCtLoc loc . CNonCanonical <$> newGiven loc eq_ty 
 
 newReport :: TyCon -> Ct -> PredType -> TcPluginM Ct
 newReport ptc_report ct msg =
- (flip setCtLoc (ctLoc ct) . CNonCanonical) <$> newWanted (ctLoc ct) rep
+ flip setCtLoc (ctLoc ct) . CNonCanonical <$> newWanted (ctLoc ct) rep
   where rep = mkTyConApp ptc_report [msg]
 
 newTyErr :: Ct -> PredType -> Ct
