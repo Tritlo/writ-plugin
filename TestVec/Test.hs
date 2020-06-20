@@ -109,11 +109,11 @@ forget a = a
 main :: IO ()
 main = do print "Enter a list of numbers!"
           -- Note that this is almost like deriving Read (Vec Unknown a) via Read a
-          xs <- read @[Integer]  <$> return "[1,3,5]" -- getLine
-          print $ safeHead (7>:xs)
-          print $ safeTail (2>:xs)
-          let k = (2>:xs)
-              mk = map (+1) k
+          xs <- read @[Int]  <$> return "[1,3,5]" -- getLine
+          print $ safeHead ((7 :: Int)>:xs)
+          print $ safeTail ((2 :: Int)>:xs)
+          let k = ((2 :: Int)>:xs)
+              mk = map (+ (1:: Int)) k
           print mk
           print (vmap (+1) k)
           -- Does not compile, since the length of xs is unknown
