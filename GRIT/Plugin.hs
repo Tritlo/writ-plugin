@@ -312,16 +312,14 @@ solveDischargeOrPromote flags@Flags{..} ptc@PTC{..} ct =
   case splitTyConApp_maybe (ctPred ct) of
     Just (tyCon, [k1,k2,ty1,ty2]) | getUnique tyCon == eqPrimTyConKey
                                     && k1 `eqType` k2 ->
-      do resProm <- if f_no_promote then return Nothing
-                    else fmap snd <$> matchFam ptc_promote [ty1,ty2]
-         resDc <- if f_no_discharge then return Nothing
-                  else fmap snd <$> matchFam ptc_discharge [k1,ty1,ty2]
+      do resProm <- unlessFlag f_no_promote $ match ptc_promote [ty1,ty2]
          let eq_ty = mkPrimEqPredRole Representational ty1 ty2
              mk_coerce = mkWanted (bumpCtLocDepth $ ctLoc ct) eq_ty
-          -- If we're promoting, we need to add a check of Coercible ty1 ty2
          res <- case resProm of
-                  Just rhs -> Just . (rhs,) . pure <$> mk_coerce
-                  _ -> return $ (,[]) <$> resDc
+            -- If we're promoting, we need to add a check of Coercible ty1 ty2
+           Just rhs -> Just . (rhs,) . pure <$> mk_coerce
+           _ -> fmap (,[]) <$>
+                  unlessFlag f_no_discharge (match ptc_discharge [k1,ty1,ty2])
          case res of
            Nothing -> wontSolve ct
            Just (rhs, extra) -> do
@@ -330,6 +328,9 @@ solveDischargeOrPromote flags@Flags{..} ptc@PTC{..} ct =
                             , checks ++ extra
                             , [])
     _ -> wontSolve ct
+  where -- We only want the rhs, we don't need the coercion.
+        match con args = fmap snd <$> matchFam con args
+        unlessFlag flag action = if flag then return Nothing else action
 
 
 -- Note that we use solveMsg before we return it to the type checker again,
