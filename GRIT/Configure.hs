@@ -5,19 +5,19 @@
 {-# LANGUAGE UndecidableInstances #-}
 module GRIT.Configure (
         Default, Promote, Ignore, Discharge,
-        Report, Message, Notify, OnlyIf,
+        Report, Message, Msg, OnlyIf,
         TypeError(..), ErrorMessage(..),
 ) where
 
 import GHC.TypeLits (TypeError(..),ErrorMessage(..))
 import Data.Kind (Constraint)
 
--- We give the new name Notify to reflect that they can also appear in
--- warnings when using GRIT, and the same with ErrorMessage.
-
+-- We give the new name Message to reflect that these can also appear
+-- in warnings when using GRIT, and the same with Msg for TypeError.
 type Message = ErrorMessage
-type family Notify (m :: Message) :: Message where
-  Notify m = TypeError m
+
+type family Msg (m :: Message) :: Message where
+  Msg m = TypeError m
 
 
 -- Default means that if we have an ambiguous l1 of kind k, we can default it to
@@ -33,12 +33,13 @@ type family Discharge (a :: k) (b :: k) :: Message
 -- Note! This only works for empty classes!
 type family Ignore (k :: Constraint) :: Message
 
--- Promote means that if we have a value (True :: Bool), we can promote it to (k Bool)
--- Note that Promote a k requires Coercible a k, otherwise a Coercible error  will be produced.
-type family Promote (a :: *) (k :: *) :: Message
+-- Promote means that if we have a value (True :: Bool), we can promote it to b
+-- Note that Promote a b requires Coercible a b, otherwise a Coercible error
+-- will be produced.
+type family Promote (a :: *) (b :: *) :: Message
 
 -- OnlyIf can be used to communicate additional constraints on promotions,
--- discharges, and ignores. 
+-- discharges, and ignores.
 type family OnlyIf (c :: Constraint) (m :: Message) :: Message where
   OnlyIf k m = m
 

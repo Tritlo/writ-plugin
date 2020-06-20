@@ -32,14 +32,14 @@ type role Vec nominal nominal
 
 -- We also know that is it safe to treat list as vectors with an unknown length.
 type instance Promote [a] (Vec Unknown a) =
-     (TypeError (Text "Automatic promotion of '"
-                 :<>: ShowType [a] :<>: Text "' to a '"
-                 :<>: ShowType (Vec Unknown a) :<>: Text "'!"))
+     (Msg (Text "Automatic promotion of '"
+           :<>: ShowType [a] :<>: Text "' to a '"
+           :<>: ShowType (Vec Unknown a) :<>: Text "'!"))
 
 type instance Promote (Vec l a) [a] =
-     (TypeError (Text "Automatic promotion of '"
-                 :<>: ShowType (Vec l a) :<>: Text "' to a '"
-                 :<>: ShowType [a] :<>: Text "'!"))
+     (Msg (Text "Automatic promotion of '"
+           :<>: ShowType (Vec l a) :<>: Text "' to a '"
+           :<>: ShowType [a] :<>: Text "'!"))
 
 -- Now we can define a safe head function, that only works if we know the length
 -- of the list, and the length is at least one.
@@ -99,9 +99,9 @@ safe2H :: length >= 2 => Vec length a -> (a,a)
 safe2H (Vec (a:b:_)) = (a,b)
 
 type instance Ignore (AtLeast n >= m) =
-  OnlyIf (m <= n) (Notify (Text "AtLeast " :<>: ShowType m
-                           :<>: Text " is at least "
-                           :<>: ShowType n))
+  OnlyIf (m <= n) (Msg (Text "AtLeast " :<>: ShowType m
+                        :<>: Text " is at least "
+                        :<>: ShowType n))
 
 forget :: Vec l a -> Vec Unknown a
 forget a = a

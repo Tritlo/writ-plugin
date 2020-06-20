@@ -2,6 +2,7 @@
 {-# LANGUAGE TypeFamilies #-}
 {-# LANGUAGE DataKinds #-}
 {-# LANGUAGE RecordWildCards #-}
+{-# LANGUAGE TupleSections #-}
 {-# LANGUAGE CPP #-}
 module GRIT.Plugin ( plugin, module GRIT.Configure ) where
 
@@ -147,16 +148,16 @@ data Flags = Flags { f_debug        :: Bool
                    , f_no_ignore    :: Bool
                    , f_no_promote   :: Bool
                    , f_no_default   :: Bool
-                   , f_keep_errors  :: Bool
+                   , f_no_report    :: Bool
                    , f_no_discharge :: Bool }
 
 getFlags :: [CommandLineOption] -> Flags
 getFlags opts = Flags { f_debug        = "debug"          `elem` opts
                       , f_quiet        = "quiet"          `elem` opts
+                      , f_no_report    = "no-report"      `elem` opts
                       , f_no_ignore    = "no-ignore"      `elem` opts
                       , f_no_promote   = "no-promote"     `elem` opts
                       , f_no_default   = "no-default"     `elem` opts
-                      , f_keep_errors  = "keep-errors"    `elem` opts 
                       , f_no_discharge = "no-discharge"   `elem` opts }
 
 gritPlugin :: [CommandLineOption] -> TcPlugin
@@ -175,6 +176,7 @@ gritPlugin opts = TcPlugin initialize solve stop
         ; mapM_ (pprDebug "Given:") given
         ; mapM_ (pprDebug "Derived:") derived
         ; mapM_ (pprDebug "Wanted:") wanted
+        ; pprDebug "Starting" empty
         ; pluginTyCons <- getPluginTyCons
         ; let solveWFun (unsolved, (solved, more, logs)) (solveFun, explain) =
                 do  {(still_unsolved, (new_solved, new_more, new_logs)) <-
@@ -187,11 +189,10 @@ gritPlugin opts = TcPlugin initialize solve stop
                     ; return (still_unsolved, (solved ++ new_solved,
                                                more ++ new_more,
                                                logs ++ new_logs)) }
-        ; let order = [ (solveReport,    "Reporting")
-                      , (solveDefault,   "Defaulting")
-                      , (solveDischarge, "Discharging")
-                      , (solveIgnore,    "Ignoring")
-                      , (solvePromote,   "Promoting") ]
+        ; let order = [ (solveReport,               "Reporting")
+                      , (solveDefault,              "Defaulting")
+                      , (solveDischargeOrPromote,   "Relating")
+                      , (solveIgnore,               "Ignoring") ]
               to_check = wanted ++ derived
         ; mapM_ (pprDebug "Checking" . pprRep) to_check
         ; (_, (solved_wanteds, more_cts, logs)) <-
@@ -206,8 +207,8 @@ data PluginTyCons = PTC { ptc_default :: TyCon
                         , ptc_promote :: TyCon
                         , ptc_only_if :: TyCon
                         , ptc_ignore  :: TyCon
-                        , ptc_discharge  :: TyCon
-                        , ptc_report  :: TyCon }
+                        , ptc_report  :: TyCon
+                        , ptc_discharge  :: TyCon }
 
 getPluginTyCons :: TcPluginM PluginTyCons
 getPluginTyCons =
@@ -283,133 +284,90 @@ solveDefault Flags{..} ptc@PTC{..} ct =
                               LogDefault{log_pred_ty = ctPred ct,
                                          log_var = var, log_kind = varType var,
                                          log_res = def, log_loc =ctLoc ct})
-           where EvExpr proof = mkProof "solve-defaultable" (mkTyVarTy var) def
+           where EvExpr proof = mkProof "grit-default" (mkTyVarTy var) def
                  pred_ty = mkPrimEqPredRole Nominal (mkTyVarTy var) def
 
 -- Solves con :: Constraint if Ignore con
 solveIgnore :: Flags -> PluginTyCons -> Ct -> TcPluginM Solution
 solveIgnore Flags{..} _ ct | f_no_ignore = wontSolve ct
 solveIgnore _ _ ct@CDictCan{..} | not (null $ classMethods cc_class) = wontSolve ct
-solveIgnore Flags{..} ptc@PTC{..} ct@CDictCan{..} = do
+solveIgnore flags@Flags{..} ptc@PTC{..} ct@CDictCan{..} = do
   res <- matchFam ptc_ignore [ctPred ct]
   case res of
     Nothing -> wontSolve ct
     Just (_, rhs) ->
-       do let ty_err = newTyErr ct rhs
-              classCon = tyConSingleDataCon (classTyCon cc_class)
-          report <- newReport ptc_report ct rhs
-          additional_constraints <- additionalConstraints ptc (ctLoc ct) rhs
+       do let classCon = tyConSingleDataCon (classTyCon cc_class)
+          checks <- solveMsg flags ptc ct rhs
           return $ Right ( Just (evDataConApp classCon cc_tyargs [], ct)
-                         , if f_keep_errors then [ty_err]
-                           else report:additional_constraints
+                         , checks
                          , [])
 solveIgnore _ _ ct = wontSolve ct
 
-
 -- Solves (a :: k) ~ (b :: k) if Discharge k a b or Discharge k b a
-solveDischarge :: Flags -> PluginTyCons -> Ct -> TcPluginM Solution
-solveDischarge Flags{..} _ ct | f_no_discharge = wontSolve ct
-solveDischarge Flags{..} ptc@PTC{..} ct =
+-- Changes a ~# B c into Coercible a (B c) if Promote (B _). Promote is
+-- essentially the same as Discharge, except we also require that
+-- a and b are Coercible.
+solveDischargeOrPromote :: Flags -> PluginTyCons -> Ct -> TcPluginM Solution
+solveDischargeOrPromote flags@Flags{..} ptc@PTC{..} ct =
   case splitTyConApp_maybe (ctPred ct) of
-    Just (tyCon, [k1,k2,ty1,ty2]) | isEqPrimPred (ctPred ct) ->
-      do res <- matchFam ptc_discharge [k1,ty1,ty2]
+    Just (tyCon, [k1,k2,ty1,ty2]) | getUnique tyCon == eqPrimTyConKey
+                                    && k1 `eqType` k2 ->
+      do resProm <- if f_no_promote then return Nothing
+                    else fmap snd <$> matchFam ptc_promote [ty1,ty2]
+         resDc <- if f_no_discharge then return Nothing
+                  else fmap snd <$> matchFam ptc_discharge [k1,ty1,ty2]
+         let eq_ty = mkPrimEqPredRole Representational ty1 ty2
+             mk_coerce = mkWanted (bumpCtLocDepth $ ctLoc ct) eq_ty
+          -- If we're promoting, we need to add a check of Coercible ty1 ty2
+         res <- case resProm of
+                  Just rhs -> Just . (rhs,) . pure <$> mk_coerce
+                  _ -> return $ (,[]) <$> resDc
          case res of
            Nothing -> wontSolve ct
-           Just (_, rhs) -> do
-            let ty_err = newTyErr ct rhs
-            report <- newReport ptc_report ct rhs
-            additional_constraints <- additionalConstraints ptc (ctLoc ct) rhs
-            return $ Right (Just (mkProof "grit-dischargeable" ty1 ty2, ct)
-                          , if f_keep_errors then [ty_err]
-                            else report:additional_constraints
-                          , [])
+           Just (rhs, extra) -> do
+             checks <- solveMsg flags ptc ct rhs
+             return $ Right (Just (mkProof "grit-equal" ty1 ty2, ct)
+                            , checks ++ extra
+                            , [])
     _ -> wontSolve ct
 
--- Changes a ~ B c into Coercible a (B c) if Promote (B _)
-solvePromote :: Flags -> PluginTyCons -> Ct -> TcPluginM Solution
-solvePromote Flags{..} _  ct  | f_no_promote = wontSolve ct
-solvePromote Flags{..} ptc@PTC{..} ct =
-   case splitTyConApp_maybe (ctPred ct) of
-      Just r@(tyCon, args@[k1,k2,ty1,ty2]) | getUnique tyCon == eqPrimTyConKey
-                                             && k1 `eqType` k2 -> do
-       res <- matchFam ptc_promote [ty1, ty2]
-       case res of
-         Just (_, rhs) -> do
-            let ty_err = newTyErr ct rhs
-                eq_ty = mkPrimEqPredRole Representational ty1 ty2
-            report <- newReport ptc_report ct rhs
-            check_coerce <- mkWanted (bumpCtLocDepth $ ctLoc ct) eq_ty
-            additional_constraints <- additionalConstraints ptc (ctLoc ct) rhs
-            return $ Right (Just (mkProof "grit-promoteable" ty1 ty2, ct)
-                           , if f_keep_errors then [ty_err]
-                            else [check_coerce, report] ++ additional_constraints
-                           , [])
-         _ -> wontSolve ct
-      _ -> wontSolve ct
+
+-- Note that we use solveMsg before we return it to the type checker again,
+-- since this way we can have the type checker "solve" the messages by applying
+-- the closed type familes Msg and OnlyIf, after we've extracted the additional
+-- checks we have to do
+solveMsg :: Flags -> PluginTyCons -> Ct -> Type -> TcPluginM [Ct]
+solveMsg flags ptc ct msg =
+  do report <- newMsg flags ptc ct msg
+     additional_constraints <- solveOnlyIf ptc (ctLoc ct) msg
+     return (report:additional_constraints)
 
 -- Additional constraints allow users to specify additional constraints for
 -- promotions and discharges.
-additionalConstraints :: PluginTyCons -> CtLoc -> Type -> TcPluginM [Ct]
-additionalConstraints PTC{..} loc ty =
-  case splitTyConApp_maybe ty of
-    Just (tc, constraint:_) | tc == ptc_only_if ->
-      pure <$> mkWanted (bumpCtLocDepth loc) constraint
+solveOnlyIf :: PluginTyCons -> CtLoc -> Type -> TcPluginM [Ct]
+solveOnlyIf ptc@PTC{..} loc msg =
+  case splitTyConApp_maybe msg of
+    Just (tc, [constraint,nested]) | tc == ptc_only_if ->
+      do c <- mkWanted (bumpCtLocDepth loc) constraint
+         more <- solveOnlyIf ptc loc nested
+         return (c:more)
     _ -> return []
 
 -- Solve Report is our way of computing whatever type familes that might be in
 -- a given type error before emitting it as a warning or error depending on
 -- which flags are set.
 solveReport :: Flags -> PluginTyCons -> Ct -> TcPluginM Solution
-solveReport Flags{..} PTC{..} ct =
+solveReport Flags{..} ptc@PTC{..} ct =
    case splitTyConApp_maybe (ctPred ct) of
       Just r@(tyCon, [msg]) | getName tyCon == getName ptc_report -> do
         let ev = Just (evDataConApp (tyConSingleDataCon tyCon) [msg] [], ct)
-        Right <$>
-         case tryImproveTyErr msg of
-           Just imp -> do report <- newReport ptc_report ct imp
-                          return (ev, [report], [])
-           _ -> if f_quiet
-                then return (ev, [], [])
-                else return (ev, [], [Log msg (ctLoc ct)])
+            logs = [Log msg (ctLoc ct)]
+        if f_no_report
+        then do ty_err <- mkWanted (ctLoc ct) msg
+                return $ Right (ev, [ty_err],[])
+        else return $ Right (ev, [], if f_quiet then [] else logs)
       _ -> wontSolve ct
 
--- tryImproveTyErr goes over a type error type and tries to fully apply all
--- closed type families. This is to prevent things like 'LabelPpr a' from
--- showing up in the error message if there is a  'default' case for LabelPpr a.
-tryImproveTyErr :: Type -> Maybe Type
-tryImproveTyErr msg =
-  do (tc, _k:msg:rest) <- splitTyConApp_maybe msg
-     guard (tyConName tc == errorMessageTypeErrorFamName)
-     imp <- improve' msg
-     return $ mkTyConApp tc (_k:imp:rest)
-  where
-    splitTcs = [typeErrorAppendDataConName, typeErrorVAppendDataConName]
-    improve' :: Type -> Maybe Type
-    improve' arg = do
-       (tc, args) <- splitTyConApp_maybe arg
-       let name = tyConName tc
-       guard (name `notElem` [typeErrorTextDataConName, typeErrorShowTypeDataConName])
-       if name `elem` splitTcs
-       then let [t1, t2] = args
-            in mkTyConApp tc <$> case (improve' t1, improve' t2) of
-                                   (Just it1, Just it2) -> Just [it1, it2]
-                                   (Just it1, _) -> Just [it1,t2]
-                                   (_, Just it2) -> Just [t1,it2]
-                                   _ -> Nothing
-       else do tryEval arg
-    -- Try eval uses the "default" case of a type family, in case not all the
-    -- parameters are known. Essentially the type family without the apartness
-    -- check. It is only used to improve the message for reports.
-    tryEval :: Type -> Maybe Type
-    tryEval arg = do
-        (tc, args) <- splitTyConApp_maybe arg
-        ax <- isClosedSynFamilyTyConWithAxiom_maybe tc
-        let branches = fromBranches $ co_ax_branches ax
-        listToMaybe $ mapMaybe (getMatches args) branches
-    getMatches :: [Type] -> CoAxBranch -> Maybe Type
-    getMatches args CoAxBranch{..}
-      = do subst <- tcMatchTys cab_lhs args
-           return $ substTyWith cab_tvs (substTyVars subst cab_tvs) cab_rhs
 
 -- Utils
 mkDerived :: CtLoc -> PredType -> TcPluginM Ct
@@ -421,13 +379,12 @@ mkWanted loc eq_ty = flip setCtLoc loc . CNonCanonical <$> newWanted loc eq_ty
 mkGiven :: CtLoc -> PredType -> EvExpr -> TcPluginM Ct
 mkGiven loc eq_ty ev = flip setCtLoc loc . CNonCanonical <$> newGiven loc eq_ty ev
 
-newReport :: TyCon -> Ct -> PredType -> TcPluginM Ct
-newReport ptc_report ct msg =
- flip setCtLoc (ctLoc ct) . CNonCanonical <$> newWanted (ctLoc ct) rep
+newMsg :: Flags -> PluginTyCons -> Ct -> PredType -> TcPluginM Ct
+newMsg Flags{..} PTC{..} ct msg =
+       do report <- CNonCanonical <$> newWanted (ctLoc ct) rep
+          return $ report `setCtLoc` ctLoc ct
   where rep = mkTyConApp ptc_report [msg]
 
-newTyErr :: Ct -> PredType -> Ct
-newTyErr ct msg = CNonCanonical (ctEvidence ct){ctev_pred=msg}
 
 mkProof :: String -> Type -> Type -> EvTerm
 mkProof str ty1 ty2 = evCoercion $ mkUnivCo (PluginProv str) Nominal ty1 ty2
