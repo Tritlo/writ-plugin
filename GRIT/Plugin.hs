@@ -163,45 +163,45 @@ getFlags opts = Flags { f_debug        = "debug"          `elem` opts
 gritPlugin :: [CommandLineOption] -> TcPlugin
 gritPlugin opts = TcPlugin initialize solve stop
   where
-     flags@Flags{..} = getFlags opts
-     initialize = tcPluginIO $ newIORef []
-     solve :: IORef [Log] -> [Ct] -> [Ct] -> [Ct] -> TcPluginM TcPluginResult
-     solve warns given derived wanted = do {
-        ; dflags <- unsafeTcPluginTcM getDynFlags
-        ; let pprDebug :: Outputable a => String -> a -> TcPluginM ()
-              pprDebug str a =
-                when f_debug $
-                  tcPluginIO $ putStrLn (str ++ " " ++ showSDoc dflags (ppr a))
-        ; pprDebug "Solving" empty
-        ; mapM_ (pprDebug "Given:") given
-        ; mapM_ (pprDebug "Derived:") derived
-        ; mapM_ (pprDebug "Wanted:") wanted
-        ; pprDebug "Starting" empty
-        ; pluginTyCons <- getPluginTyCons
-        ; let solveWFun (unsolved, (solved, more, logs)) (solveFun, explain) =
-                do  {(still_unsolved, (new_solved, new_more, new_logs)) <-
-                         inspectSol <$>
-                            mapM (solveFun flags pluginTyCons) unsolved
-                    ; mapM_ (pprDebug (explain ++ "-sols")) new_solved
-                    ; mapM_ (pprDebug (explain ++ "-more")) new_more
-                    ; mapM_ (pprDebug (explain ++ "-reps") . pprRep) new_more
-                    ; mapM_ (pprDebug (explain ++ "-logs")) new_logs
-                    ; return (still_unsolved, (solved ++ new_solved,
-                                               more ++ new_more,
-                                               logs ++ new_logs)) }
-        ; let order = [ (solveReport,               "Reporting")
-                      , (solveDefault,              "Defaulting")
-                      , (solveDischarge,            "Discharging")
-                      , (solveIgnore,               "Ignoring") ]
-              to_check = wanted ++ derived
-        ; mapM_ (pprDebug "Checking" . pprRep) to_check
-        ; (_, (solved_wanteds, more_cts, logs)) <-
-             foldM solveWFun (to_check, ([],[],[])) order
-        ; tcPluginIO $ modifyIORef warns (logs ++)
-        ; return $ TcPluginOk solved_wanteds more_cts }
-     stop warns =
-        do { dflags <- unsafeTcPluginTcM getDynFlags
-           ; tcPluginIO $ readIORef warns >>= mapM_ (addWarning dflags) . sort . nub }
+    flags@Flags{..} = getFlags opts
+    initialize = tcPluginIO $ newIORef []
+    solve :: IORef [Log] -> [Ct] -> [Ct] -> [Ct] -> TcPluginM TcPluginResult
+    solve warns given derived wanted = do
+       dflags <- unsafeTcPluginTcM getDynFlags
+       let pprDebug :: Outputable a => String -> a -> TcPluginM ()
+           pprDebug str a = when f_debug $
+               tcPluginIO $ putStrLn (str ++ " " ++ showSDoc dflags (ppr a))
+       pprDebug "Solving" empty
+       pprDebug "-------" empty
+       mapM_ (pprDebug "Given:") given
+       mapM_ (pprDebug "Derived:") derived
+       mapM_ (pprDebug "Wanted:") wanted
+       pprDebug "-------" empty
+       pluginTyCons <- getPluginTyCons
+       let solveWFun :: ([Ct], ([(EvTerm, Ct)],[Ct],[Log])) -> (SolveFun, String)
+                     -> TcPluginM ([Ct], ([(EvTerm, Ct)],[Ct],[Log]))
+           solveWFun (unsolved, (solved, more, logs)) (solveFun, explain) = do
+             (still_unsolved, (new_solved, new_more, new_logs)) <-
+               inspectSol <$> mapM (solveFun flags pluginTyCons) unsolved
+             mapM_ (pprDebug (explain ++ "-sols")) new_solved
+             mapM_ (pprDebug (explain ++ "-more")) new_more
+             mapM_ (pprDebug (explain ++ "-logs")) new_logs
+             return (still_unsolved, (solved ++ new_solved,
+                                      more ++ new_more,
+                                      logs ++ new_logs))
+           order :: [(SolveFun, String)]
+           order = [ (solveReport,    "Reporting")
+                   , (solveDefault,   "Defaulting")
+                   , (solveDischarge, "Discharging")
+                   , (solveIgnore,    "Ignoring") ]
+           to_check = wanted ++ derived
+       (_, (solved_wanteds, more_cts, logs)) <-
+          foldM solveWFun (to_check, ([],[],[])) order
+       tcPluginIO $ modifyIORef warns (logs ++)
+       return $ TcPluginOk solved_wanteds more_cts
+    stop warns =
+      do dflags <- unsafeTcPluginTcM getDynFlags
+         tcPluginIO $ readIORef warns >>= mapM_ (addWarning dflags) . sort . nub
 
 data PluginTyCons = PTC { ptc_default :: TyCon
                         , ptc_promote :: TyCon
@@ -232,6 +232,7 @@ type Solution = Either Ct (Maybe (EvTerm, Ct), -- The solution to the Ct
                            [Ct],               -- Possible additional work
                            [Log])              -- What we did
 
+type SolveFun = Flags -> PluginTyCons -> Ct -> TcPluginM Solution
 
 wontSolve :: Ct -> TcPluginM Solution
 wontSolve = return . Left
@@ -239,17 +240,9 @@ wontSolve = return . Left
 couldSolve :: Maybe (EvTerm,Ct) -> [Ct] -> [Log] -> TcPluginM Solution
 couldSolve ev work logs = return (Right (ev,work,logs))
 
-pprRep :: Ct -> SDoc
-pprRep ct =
-  case userTypeError_maybe (ctPred ct) of
-     Just m -> pprUserTypeErrorTy m <+> ppr (ctLocSpan $ ctLoc ct)
-     _ -> case splitTyConApp_maybe (ctPred ct) of
-            Just (tc, [msg]) -> pprUserTypeErrorTy msg <+> ppr (ctLocSpan $ ctLoc ct)
-            _ -> pprUserTypeErrorTy (ctPred ct) <+> ppr (ctLocSpan $ ctLoc ct)
-
 
 -- Defaults any ambiguous type variables of kind k to l if Default k = l
-solveDefault :: Flags -> PluginTyCons -> Ct -> TcPluginM Solution
+solveDefault :: SolveFun
 solveDefault Flags{..} _ ct | f_no_default = wontSolve ct
 solveDefault Flags{..} ptc@PTC{..} ct =
   do defaults <- catMaybes <$> mapM getDefault (tyCoVarsOfCtList ct)
@@ -288,8 +281,8 @@ solveDefault Flags{..} ptc@PTC{..} ct =
            where EvExpr proof = mkProof "grit-default" (mkTyVarTy var) def
                  pred_ty = mkPrimEqPredRole Nominal (mkTyVarTy var) def
 
--- Solves con :: Constraint if Ignore con
-solveIgnore :: Flags -> PluginTyCons -> Ct -> TcPluginM Solution
+-- Solves con :: Constraint if Ignore con, where con is an empty class
+solveIgnore :: SolveFun
 solveIgnore Flags{..} _ ct | f_no_ignore = wontSolve ct
 solveIgnore _ _ ct@CDictCan{..} | not (null $ classMethods cc_class) = wontSolve ct
 solveIgnore flags@Flags{..} ptc@PTC{..} ct@CDictCan{..} = do
@@ -302,11 +295,9 @@ solveIgnore flags@Flags{..} ptc@PTC{..} ct@CDictCan{..} = do
       couldSolve (Just (evDataConApp classCon cc_tyargs [], ct)) checks []
 solveIgnore _ _ ct = wontSolve ct
 
--- Solves (a :: k) ~ (b :: k) if Discharge k a b or Discharge k b a
--- Changes a ~# B c into Coercible a (B c) if Promote (B _). Promote is
--- essentially the same as Discharge, except we also require that
--- a and b are Coercible.
-solveDischarge :: Flags -> PluginTyCons -> Ct -> TcPluginM Solution
+-- Solves (a :: k) ~ (b :: k) if Discharge k a b. Promote is
+-- the same as Discharge, except we also require that a and b are Coercible.
+solveDischarge :: SolveFun
 solveDischarge flags@Flags{..} ptc@PTC{..} ct =
   case splitTyConApp_maybe (ctPred ct) of
     Just (tyCon, [k1,k2,ty1,ty2]) | getUnique tyCon == eqPrimTyConKey
@@ -370,7 +361,7 @@ checkOnlyIf ptc@PTC{..} loc msg =
 -- Solve Report is our way of computing whatever type familes that might be in
 -- a given type error before emitting it as a warning or error depending on
 -- which flags are set.
-solveReport :: Flags -> PluginTyCons -> Ct -> TcPluginM Solution
+solveReport :: SolveFun
 solveReport Flags{..} ptc@PTC{..} ct =
    case splitTyConApp_maybe (ctPred ct) of
       Just r@(tyCon, [msg]) | getName tyCon == getName ptc_report -> do
