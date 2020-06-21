@@ -322,6 +322,9 @@ solveDischarge flags@Flags{..} ptc@PTC{..} ct =
           _ | tcIsLiftedTypeKind k1 -> do
                -- We only solve (a :: *) ~ (b :: *) if Promote a b
                hasProm <- isJust <$> matchFam ptc_promote [ty1, ty2]
+               -- Note that we don't use the rhs here, since it is already
+               -- taken care of by the Discharge a b instance (and the)
+               -- Coercible constraint as well.
                if hasProm then might else can't
           -- Otherwise, it's a regular discharge
           _ | f_no_discharge -> can't
