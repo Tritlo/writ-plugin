@@ -11,6 +11,7 @@ module GRIT.Configure (
 
 import GHC.TypeLits (TypeError(..),ErrorMessage(..))
 import Data.Kind (Constraint)
+import Data.Coerce (Coercible)
 
 -- We give the new name Message to reflect that these can also appear
 -- in warnings when using GRIT, and the same with Msg for TypeError.
@@ -40,6 +41,10 @@ type family Ignore (k :: Constraint) :: Message
 --                           ===
 -- type instance Discharge a b = OnlyIf (Corecible a b) m
 type family Promote (a :: *) (b :: *) :: Message
+
+-- We require that Discharge a b is the same as Promote a b.
+type instance Discharge (a :: *) (b :: *) =
+    OnlyIf (Coercible a b) (Promote a b)
 
 -- OnlyIf can be used to communicate additional constraints on promotions,
 -- discharges, and ignores.

@@ -191,7 +191,7 @@ gritPlugin opts = TcPlugin initialize solve stop
                                                logs ++ new_logs)) }
         ; let order = [ (solveReport,               "Reporting")
                       , (solveDefault,              "Defaulting")
-                      , (solveDischargeOrPromote,   "Relating")
+                      , (solveDischarge,            "Discharging")
                       , (solveIgnore,               "Ignoring") ]
               to_check = wanted ++ derived
         ; mapM_ (pprDebug "Checking" . pprRep) to_check
@@ -236,6 +236,9 @@ type Solution = Either Ct (Maybe (EvTerm, Ct), -- The solution to the Ct
 wontSolve :: Ct -> TcPluginM Solution
 wontSolve = return . Left
 
+couldSolve :: Maybe (EvTerm,Ct) -> [Ct] -> [Log] -> TcPluginM Solution
+couldSolve ev work logs = return (Right (ev,work,logs))
+
 pprRep :: Ct -> SDoc
 pprRep ct =
   case userTypeError_maybe (ctPred ct) of
@@ -267,9 +270,7 @@ solveDefault Flags{..} ptc@PTC{..} ct =
       -- mention a meta type variable in a given.
       do let (eq_tys, logs) = unzip $ map mkTyEq defaults
          assert_eqs <- mapM mkAssert eq_tys
-         return $ Right ( Nothing
-                        , assert_eqs
-                        , if f_quiet then [] else logs)
+         couldSolve Nothing assert_eqs (if f_quiet then [] else logs)
    where mkAssert :: Either PredType (Type, EvExpr) -> TcPluginM Ct
          mkAssert = either (mkDerived bump) (uncurry (mkGiven bump))
          bump = bumpCtLocDepth $ ctLoc ct
@@ -295,42 +296,42 @@ solveIgnore flags@Flags{..} ptc@PTC{..} ct@CDictCan{..} = do
   res <- matchFam ptc_ignore [ctPred ct]
   case res of
     Nothing -> wontSolve ct
-    Just (_, rhs) ->
-       do let classCon = tyConSingleDataCon (classTyCon cc_class)
-          checks <- checkMsg flags ptc ct rhs
-          return $ Right ( Just (evDataConApp classCon cc_tyargs [], ct)
-                         , checks
-                         , [])
+    Just (_, rhs) -> do
+      let classCon = tyConSingleDataCon (classTyCon cc_class)
+      checks <- checkMsg flags ptc ct rhs
+      couldSolve (Just (evDataConApp classCon cc_tyargs [], ct)) checks []
 solveIgnore _ _ ct = wontSolve ct
 
 -- Solves (a :: k) ~ (b :: k) if Discharge k a b or Discharge k b a
 -- Changes a ~# B c into Coercible a (B c) if Promote (B _). Promote is
 -- essentially the same as Discharge, except we also require that
 -- a and b are Coercible.
-solveDischargeOrPromote :: Flags -> PluginTyCons -> Ct -> TcPluginM Solution
-solveDischargeOrPromote flags@Flags{..} ptc@PTC{..} ct =
+solveDischarge :: Flags -> PluginTyCons -> Ct -> TcPluginM Solution
+solveDischarge flags@Flags{..} ptc@PTC{..} ct =
   case splitTyConApp_maybe (ctPred ct) of
     Just (tyCon, [k1,k2,ty1,ty2]) | getUnique tyCon == eqPrimTyConKey
-                                    && k1 `eqType` k2 ->
-      do resProm <- unlessFlag f_no_promote $ match ptc_promote [ty1,ty2]
-         let eq_ty = mkPrimEqPredRole Representational ty1 ty2
-             mk_coerce_check = mkWanted (bumpCtLocDepth $ ctLoc ct) eq_ty
-         res <- case resProm of
-            -- If we're promoting, we need to add a check of Coercible ty1 ty2
-           Just msg -> Just . (msg,) . pure <$> mk_coerce_check
-           _ -> fmap (,[]) <$>
-                  unlessFlag f_no_discharge (match ptc_discharge [k1,ty1,ty2])
-         case res of
-           Nothing -> wontSolve ct
-           Just (msg, extra) -> do
-             checks <- checkMsg flags ptc ct msg
-             return $ Right (Just (mkProof "grit-equal" ty1 ty2, ct)
-                            , checks ++ extra
-                            , [])
+                                    && k1 `eqType` k2 -> do
+      famRes <- matchFam ptc_discharge [k1, ty1, ty2]
+      let (might, can't) = (return famRes, return Nothing)
+      canSolve <-
+        case famRes of
+          Nothing -> can't
+          -- If k is *, then we are doing a promotion, since the only
+          -- instance of Discharge (a :: *) (b ::*) is for Promote.
+          _ | tcIsLiftedTypeKind k1 && f_no_promote -> can't
+          _ | tcIsLiftedTypeKind k1 -> do
+               -- We only solve (a :: *) ~ (b :: *) if Promote a b
+               hasProm <- isJust <$> matchFam ptc_promote [ty1, ty2]
+               if hasProm then might else can't
+          -- Otherwise, it's a regular discharge
+          _ | f_no_discharge -> can't
+          _ -> might
+      case canSolve of
+        Nothing -> wontSolve ct
+        Just (_, msg) -> do
+          checks <- checkMsg flags ptc ct msg
+          couldSolve (Just (mkProof "grit-equal" ty1 ty2, ct)) checks []
     _ -> wontSolve ct
-  where -- We only want the rhs, we don't need the coercion.
-        match con args = fmap snd <$> matchFam con args
-        unlessFlag flag action = if flag then return Nothing else action
 
 
 -- Note that we use checkMsg before we return it to the type checker again,
@@ -354,6 +355,13 @@ checkOnlyIf ptc@PTC{..} loc msg =
       do c <- mkWanted (bumpCtLocDepth loc) constraint
          more <- checkOnlyIf ptc loc nested
          return (c:more)
+    -- We want to look throught type families here, such as in the
+    -- Discharge (a :: *) (b :: *) case.
+    Just (tc, args) ->
+        do match <- matchFam tc args
+           case match of
+              Just (_, nested) -> checkOnlyIf ptc loc nested
+              _ -> return []
     _ -> return []
 
 -- Solve Report is our way of computing whatever type familes that might be in
@@ -367,8 +375,8 @@ solveReport Flags{..} ptc@PTC{..} ct =
             logs = [Log msg (ctLoc ct)]
         if f_no_report
         then do ty_err <- mkWanted (ctLoc ct) msg
-                return $ Right (ev, [ty_err],[])
-        else return $ Right (ev, [], if f_quiet then [] else logs)
+                couldSolve ev [ty_err] []
+        else couldSolve ev [] (if f_quiet then [] else logs)
       _ -> wontSolve ct
 
 
