@@ -35,7 +35,10 @@ type family Ignore (k :: Constraint) :: Message
 
 -- Promote means that if we have a value (True :: Bool), we can promote it to b
 -- Note that Promote a b requires Coercible a b, otherwise a Coercible error
--- will be produced.
+-- will be produced. Note that:
+--               type instance Promote a b = m
+--                           ===
+-- type instance Discharge a b = OnlyIf (Corecible a b) m
 type family Promote (a :: *) (b :: *) :: Message
 
 -- OnlyIf can be used to communicate additional constraints on promotions,

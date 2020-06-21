@@ -314,16 +314,16 @@ solveDischargeOrPromote flags@Flags{..} ptc@PTC{..} ct =
                                     && k1 `eqType` k2 ->
       do resProm <- unlessFlag f_no_promote $ match ptc_promote [ty1,ty2]
          let eq_ty = mkPrimEqPredRole Representational ty1 ty2
-             mk_coerce = mkWanted (bumpCtLocDepth $ ctLoc ct) eq_ty
+             mk_coerce_check = mkWanted (bumpCtLocDepth $ ctLoc ct) eq_ty
          res <- case resProm of
             -- If we're promoting, we need to add a check of Coercible ty1 ty2
-           Just rhs -> Just . (rhs,) . pure <$> mk_coerce
+           Just msg -> Just . (msg,) . pure <$> mk_coerce_check
            _ -> fmap (,[]) <$>
                   unlessFlag f_no_discharge (match ptc_discharge [k1,ty1,ty2])
          case res of
            Nothing -> wontSolve ct
-           Just (rhs, extra) -> do
-             checks <- checkMsg flags ptc ct rhs
+           Just (msg, extra) -> do
+             checks <- checkMsg flags ptc ct msg
              return $ Right (Just (mkProof "grit-equal" ty1 ty2, ct)
                             , checks ++ extra
                             , [])
