@@ -242,10 +242,11 @@ couldSolve ev work logs = return (Right (ev,work,logs))
 
 
 -- Defaults any ambiguous type variables of kind k to l if Default k = l
+-- Ignores any variables of kind (*)
 solveDefault :: SolveFun
 solveDefault Flags{..} _ ct | f_no_default = wontSolve ct
 solveDefault Flags{..} ptc@PTC{..} ct =
-  do defaults <- catMaybes <$> mapM getDefault (tyCoVarsOfCtList ct)
+  do defaults <- catMaybes <$> mapM getDefault (nonStar $ tyCoVarsOfCtList ct)
      if null defaults
      then wontSolve ct
      else
@@ -266,6 +267,7 @@ solveDefault Flags{..} ptc@PTC{..} ct =
          couldSolve Nothing assert_eqs (if f_quiet then [] else logs)
    where mkAssert :: Either PredType (Type, EvExpr) -> TcPluginM Ct
          mkAssert = either (mkDerived bump) (uncurry (mkGiven bump))
+         nonStar = filter (not . tcIsLiftedTypeKind . varType)
          bump = bumpCtLocDepth $ ctLoc ct
          getDefault var = do
            res <- matchFam ptc_default [varType var]
@@ -281,7 +283,8 @@ solveDefault Flags{..} ptc@PTC{..} ct =
            where EvExpr proof = mkProof "grit-default" (mkTyVarTy var) def
                  pred_ty = mkPrimEqPredRole Nominal (mkTyVarTy var) def
 
--- Solves con :: Constraint if Ignore con, where con is an empty class
+-- Solves \Gamma |- c :: Constraint if \Gamma |- Ignore c ~ m,
+-- *where c is an empty class*
 solveIgnore :: SolveFun
 solveIgnore Flags{..} _ ct | f_no_ignore = wontSolve ct
 solveIgnore _ _ ct@CDictCan{..} | not (null $ classMethods cc_class) = wontSolve ct
@@ -295,7 +298,7 @@ solveIgnore flags@Flags{..} ptc@PTC{..} ct@CDictCan{..} = do
       couldSolve (Just (evDataConApp classCon cc_tyargs [], ct)) checks []
 solveIgnore _ _ ct = wontSolve ct
 
--- Solves (a :: k) ~ (b :: k) if Discharge k a b. Promote is
+-- Solves (a :: k) ~ (b :: k) if \Gamma |- Discharge a b ~ m. Promote is
 -- the same as Discharge, except we also require that a and b are Coercible.
 solveDischarge :: SolveFun
 solveDischarge flags@Flags{..} ptc@PTC{..} ct =
