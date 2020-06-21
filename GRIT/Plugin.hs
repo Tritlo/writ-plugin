@@ -342,17 +342,17 @@ solveDischargeOrPromote flags@Flags{..} ptc@PTC{..} ct =
 checkMsg :: Flags -> PluginTyCons -> Ct -> Type -> TcPluginM [Ct]
 checkMsg flags ptc ct msg =
   do report <- newReport flags ptc ct msg
-     additional_constraints <- solveOnlyIf ptc (ctLoc ct) msg
+     additional_constraints <- checkOnlyIf ptc (ctLoc ct) msg
      return (report:additional_constraints)
 
 -- Additional constraints allow users to specify additional constraints for
 -- promotions and discharges.
-solveOnlyIf :: PluginTyCons -> CtLoc -> Type -> TcPluginM [Ct]
-solveOnlyIf ptc@PTC{..} loc msg =
+checkOnlyIf :: PluginTyCons -> CtLoc -> Type -> TcPluginM [Ct]
+checkOnlyIf ptc@PTC{..} loc msg =
   case splitTyConApp_maybe msg of
     Just (tc, [constraint,nested]) | tc == ptc_only_if ->
       do c <- mkWanted (bumpCtLocDepth loc) constraint
-         more <- solveOnlyIf ptc loc nested
+         more <- checkOnlyIf ptc loc nested
          return (c:more)
     _ -> return []
 
