@@ -297,7 +297,7 @@ solveIgnore flags@Flags{..} ptc@PTC{..} ct@CDictCan{..} = do
     Nothing -> wontSolve ct
     Just (_, rhs) ->
        do let classCon = tyConSingleDataCon (classTyCon cc_class)
-          checks <- solveMsg flags ptc ct rhs
+          checks <- checkMsg flags ptc ct rhs
           return $ Right ( Just (evDataConApp classCon cc_tyargs [], ct)
                          , checks
                          , [])
@@ -323,7 +323,7 @@ solveDischargeOrPromote flags@Flags{..} ptc@PTC{..} ct =
          case res of
            Nothing -> wontSolve ct
            Just (rhs, extra) -> do
-             checks <- solveMsg flags ptc ct rhs
+             checks <- checkMsg flags ptc ct rhs
              return $ Right (Just (mkProof "grit-equal" ty1 ty2, ct)
                             , checks ++ extra
                             , [])
@@ -333,13 +333,15 @@ solveDischargeOrPromote flags@Flags{..} ptc@PTC{..} ct =
         unlessFlag flag action = if flag then return Nothing else action
 
 
--- Note that we use solveMsg before we return it to the type checker again,
+-- Note that we use checkMsg before we return it to the type checker again,
 -- since this way we can have the type checker "solve" the messages by applying
 -- the closed type familes Msg and OnlyIf, after we've extracted the additional
--- checks we have to do
-solveMsg :: Flags -> PluginTyCons -> Ct -> Type -> TcPluginM [Ct]
-solveMsg flags ptc ct msg =
-  do report <- newMsg flags ptc ct msg
+-- checks we have to do. To simplify, we always wrap messages in a report.
+-- If these reports end up going unsolved (i.e. with the -no-report flag), then
+-- we unwrap the report in solveReport and check the message.
+checkMsg :: Flags -> PluginTyCons -> Ct -> Type -> TcPluginM [Ct]
+checkMsg flags ptc ct msg =
+  do report <- newReport flags ptc ct msg
      additional_constraints <- solveOnlyIf ptc (ctLoc ct) msg
      return (report:additional_constraints)
 
@@ -380,8 +382,8 @@ mkWanted loc eq_ty = flip setCtLoc loc . CNonCanonical <$> newWanted loc eq_ty
 mkGiven :: CtLoc -> PredType -> EvExpr -> TcPluginM Ct
 mkGiven loc eq_ty ev = flip setCtLoc loc . CNonCanonical <$> newGiven loc eq_ty ev
 
-newMsg :: Flags -> PluginTyCons -> Ct -> PredType -> TcPluginM Ct
-newMsg Flags{..} PTC{..} ct msg =
+newReport :: Flags -> PluginTyCons -> Ct -> PredType -> TcPluginM Ct
+newReport Flags{..} PTC{..} ct msg =
        do report <- CNonCanonical <$> newWanted (ctLoc ct) rep
           return $ report `setCtLoc` ctLoc ct
   where rep = mkTyConApp ptc_report [msg]
