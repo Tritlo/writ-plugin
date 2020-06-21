@@ -283,7 +283,7 @@ solveDefault Flags{..} ptc@PTC{..} ct =
            where EvExpr proof = mkProof "grit-default" (mkTyVarTy var) def
                  pred_ty = mkPrimEqPredRole Nominal (mkTyVarTy var) def
 
--- Solves \Gamma |- c :: Constraint if \Gamma |- Ignore c ~ m,
+-- Solves Γ |- c :: Constraint if Γ |- Ignore c ~ m,
 -- *where c is an empty class*
 solveIgnore :: SolveFun
 solveIgnore Flags{..} _ ct | f_no_ignore = wontSolve ct
@@ -298,7 +298,7 @@ solveIgnore flags@Flags{..} ptc@PTC{..} ct@CDictCan{..} = do
       couldSolve (Just (evDataConApp classCon cc_tyargs [], ct)) checks []
 solveIgnore _ _ ct = wontSolve ct
 
--- Solves (a :: k) ~ (b :: k) if \Gamma |- Discharge a b ~ m. Promote is
+-- Solves (a :: k) ~ (b :Γ: k) if Γ |- Discharge a b ~ m. Promote is
 -- the same as Discharge, except we also require that a and b are Coercible.
 solveDischarge :: SolveFun
 solveDischarge flags@Flags{..} ptc@PTC{..} ct =
