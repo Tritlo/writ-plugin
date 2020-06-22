@@ -283,7 +283,7 @@ solveDefault Flags{..} ptc@PTC{..} ct =
            where EvExpr proof = mkProof "grit-default" (mkTyVarTy var) def
                  pred_ty = mkPrimEqPredRole Nominal (mkTyVarTy var) def
 
--- Solves Γ |- c :: Constraint if Γ |- Ignore c ~ m,
+-- Solves Γ |- c :: Constraint if Γ |- Ignore c ~ m and  Γ |- m,
 -- *where c is an empty class*
 solveIgnore :: SolveFun
 solveIgnore Flags{..} _ ct | f_no_ignore = wontSolve ct
@@ -298,8 +298,9 @@ solveIgnore flags@Flags{..} ptc@PTC{..} ct@CDictCan{..} = do
       couldSolve (Just (evDataConApp classCon cc_tyargs [], ct)) checks []
 solveIgnore _ _ ct = wontSolve ct
 
--- Solves (a :: k) ~ (b :Γ: k) if Γ |- Discharge a b ~ m. Promote is
--- the same as Discharge, except we also require that a and b are Coercible.
+-- Solves Γ |- (a :: k) ~ (b :: k) if Γ |- Discharge a b ~ m and  Γ |- m.
+-- Promote is the same as Discharge, except we also require that a and b be
+-- Coercible.
 solveDischarge :: SolveFun
 solveDischarge flags@Flags{..} ptc@PTC{..} ct =
   case splitTyConApp_maybe (ctPred ct) of
@@ -363,7 +364,8 @@ checkOnlyIf ptc@PTC{..} loc msg =
 
 -- Solve Report is our way of computing whatever type familes that might be in
 -- a given type error before emitting it as a warning or error depending on
--- which flags are set.
+-- which flags are set. Solves  Γ |- Report m by either requiring  Γ |- m
+-- (which is a type error) or by emitting a warning.
 solveReport :: SolveFun
 solveReport Flags{..} ptc@PTC{..} ct =
    case splitTyConApp_maybe (ctPred ct) of
