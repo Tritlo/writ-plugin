@@ -12,7 +12,7 @@ import Control.Monad (when, guard, foldM, zipWithM, msum)
 import Data.Maybe (mapMaybe, catMaybes, fromMaybe, fromJust, listToMaybe, isJust)
 import Data.Either
 import Data.IORef
-import Data.List (nub, sort)
+import Data.List (intersperse)
 import Data.Function (on)
 import Data.Kind (Constraint)
 import Data.Data (Data, toConstr)
@@ -122,15 +122,14 @@ instance Outputable Log where
         case userTypeError_maybe log_pred_ty of
            Just msg -> pprUserTypeErrorTy msg
            _ -> text "GRIT" <+> ppr log_pred_ty
-   ppr LogDefault{..} = hang (fsep [ text "Defaulting"
+   ppr LogDefault{..} = fsep [ text "Defaulting"
                                -- We want to print a instead of a0
                              , quotes (ppr (mkTyVarTy log_var)
                                        <+> dcolon <+> ppr log_kind)
                              , text "to"
-                             ,  quotes (ppr log_res) ])
-                             ( length "Defaulting" - length "in")
-                             (fsep [ text "in"
-                                  , quotes (ppr log_pred_ty)])
+                             , quotes (ppr log_res)
+                             , text "in"
+                             , quotes (ppr log_pred_ty)]
       where printFlav Given = "Will default"
             printFlav _ = "Defaulting"
 
@@ -143,13 +142,23 @@ zonkLog log = return log
 
 logToErr :: Log -> TcPluginM Ct
 logToErr Log{..} = mkWanted log_loc log_pred_ty
-logToErr log =
+logToErr LogDefault{..} =
    do txtCon <- promoteDataCon <$> tcLookupDataCon typeErrorTextDataConName
+      appCon <- promoteDataCon <$> tcLookupDataCon typeErrorAppendDataConName
       dflags <- unsafeTcPluginTcM getDynFlags
       let txt str = mkTyConApp txtCon [mkStrLitTy $ fsLit str]
-          msg = txt $ showSDoc dflags $ ppr log
-      tcPluginIO $ putStrLn $ showSDoc dflags $ ppr msg
-      mkTyErr msg >>= mkWanted (log_loc log)
+          sppr = txt . showSDoc dflags . ppr
+          app ty1 ty2 = mkTyConApp appCon [ty1, ty2]
+          msg = foldl1 app $
+                  map sppr $ intersperse (text " ") $
+                    [ text "Defaulting"
+                    , quotes (ppr (mkTyVarTy log_var)
+                              <+> dcolon <+> ppr log_kind)
+                    , text "to"
+                    , quotes (ppr log_res)
+                    , text "in"
+                    , quotes (ppr log_pred_ty)]
+      mkTyErr msg >>= mkWanted log_loc
 
 addWarning :: DynFlags -> Log -> TcPluginM ()
 addWarning dflags log = tcPluginIO $ warn (ppr log)
@@ -207,7 +216,6 @@ gritPlugin opts = TcPlugin initialize solve stop
                inspectSol <$> mapM (solveFun flags pluginTyCons) unsolved
              mapM_ (pprDebug (explain ++ "-sols")) new_solved
              mapM_ (pprDebug (explain ++ "-more")) new_more
-             mapM_ (pprDebug (explain ++ "-logs")) new_logs
              return (still_unsolved, (solved ++ new_solved,
                                       more ++ new_more,
                                       logs `Set.union` new_logs))
@@ -372,6 +380,8 @@ checkMsg PTC{..} ct msg =  do
   return (ct, ty_err)
 
 
+-- Solve only if solves equalities of the for OnlyIf C m_a ~ m_b, by checking
+-- that C holds and that m_a ~ m_b.
 solveOnlyIf :: SolveFun
 solveOnlyIf _ PTC{..} ct =
   case splitEquality (ctPred ct) of
