@@ -122,22 +122,34 @@ instance Outputable Log where
         case userTypeError_maybe log_pred_ty of
            Just msg -> pprUserTypeErrorTy msg
            _ -> text "GRIT" <+> ppr log_pred_ty
-   ppr LogDefault{..} = text "Defaulting"
-                        -- We want to print a instead of a0
-                        <+> quotes (ppr (mkTyVarTy log_var)
-                                   <+> dcolon <+> ppr log_kind)
-                        <+> text "to"
-                        -- We want to print L instead of 'L if possible
-                        <+> quotes (ppr log_res)
-                        <+> text "in"
-                        <+> quotes (ppr log_pred_ty)
-                        <> text "!"
+   ppr LogDefault{..} = hang (fsep [ text "Defaulting"
+                               -- We want to print a instead of a0
+                             , quotes (ppr (mkTyVarTy log_var)
+                                       <+> dcolon <+> ppr log_kind)
+                             , text "to"
+                             ,  quotes (ppr log_res) ])
+                             ( length "Defaulting" - length "in")
+                             (fsep [ text "in"
+                                  , quotes (ppr log_pred_ty)])
       where printFlav Given = "Will default"
             printFlav _ = "Defaulting"
 
 zonkLog :: Log -> TcPluginM Log
-zonkLog log = do zonked <- zonkTcType (log_pred_ty log)
-                 return $ log{log_pred_ty=zonked}
+zonkLog log@Log{..} = do zonked <- zonkTcType log_pred_ty
+                         return $ log{log_pred_ty=zonked}
+-- We don't want to zonk LogDefault, since then we can't see what variable was
+-- being defaulted.
+zonkLog log = return log
+
+logToErr :: Log -> TcPluginM Ct
+logToErr Log{..} = mkWanted log_loc log_pred_ty
+logToErr log =
+   do txtCon <- promoteDataCon <$> tcLookupDataCon typeErrorTextDataConName
+      dflags <- unsafeTcPluginTcM getDynFlags
+      let txt str = mkTyConApp txtCon [mkStrLitTy $ fsLit str]
+          msg = txt $ showSDoc dflags $ ppr log
+      tcPluginIO $ putStrLn $ showSDoc dflags $ ppr msg
+      mkTyErr msg >>= mkWanted (log_loc log)
 
 addWarning :: DynFlags -> Log -> TcPluginM ()
 addWarning dflags log = tcPluginIO $ warn (ppr log)
@@ -155,7 +167,7 @@ data Flags = Flags { f_debug        :: Bool
                    , f_no_ignore    :: Bool
                    , f_no_promote   :: Bool
                    , f_no_discharge :: Bool
-                   , f_no_only_if   :: Bool }
+                   , f_no_only_if   :: Bool } deriving (Show)
 
 getFlags :: [CommandLineOption] -> Flags
 getFlags opts = Flags { f_debug        = "debug"          `elem` opts
@@ -171,7 +183,10 @@ gritPlugin :: [CommandLineOption] -> TcPlugin
 gritPlugin opts = TcPlugin initialize solve stop
   where
     flags@Flags{..} = getFlags opts
-    initialize = tcPluginIO $ newIORef Set.empty
+    initialize = do
+      when f_debug $ tcPluginIO $ putStrLn "Starting GRIT in debug mode..."
+      when f_debug $ tcPluginIO $ print flags
+      tcPluginIO $ newIORef Set.empty
     solve :: IORef (Set Log) -> [Ct] -> [Ct] -> [Ct] -> TcPluginM TcPluginResult
     solve warns given derived wanted = do
        dflags <- unsafeTcPluginTcM getDynFlags
@@ -197,26 +212,22 @@ gritPlugin opts = TcPlugin initialize solve stop
                                       more ++ new_more,
                                       logs `Set.union` new_logs))
            order :: [(SolveFun, String)]
-           order = [ (solveDefault,   "Defaulting")
+           order = [ (solveIgnore,    "Ignoring")
+                   , (solveDefault,   "Defaulting")
                    , (solveOnlyIf,    "OnlyIf")
-                   , (solveDischarge, "Discharging")
-                   , (solveIgnore,    "Ignoring") ]
+                   , (solveDischarge, "Discharging") ]
            to_check = wanted ++ derived
        (_, (solved_wanteds, more_cts, logs)) <-
           foldM solveWFun (to_check, ([],[],Set.empty)) order
-       ty_errs <- if f_keep_errors
-                  then catMaybes <$> mapM logToErr (Set.toAscList logs)
-                  else do tcPluginIO $ modifyIORef warns (logs `Set.union`)
-                          return []
-       return $ TcPluginOk solved_wanteds (ty_errs ++ more_cts)
+       errs <- if f_keep_errors
+               then mapM logToErr (Set.toAscList logs)
+               else tcPluginIO $ modifyIORef warns (logs `Set.union`) >> mempty
+       return $ TcPluginOk solved_wanteds (errs ++ more_cts)
     stop warns = do dflags <- unsafeTcPluginTcM getDynFlags
                     logs <- Set.toAscList <$> tcPluginIO (readIORef warns)
                     zonked_logs <- mapM zonkLog logs
                     when (not f_quiet) $ mapM_ (addWarning dflags) zonked_logs
 
-logToErr :: Log -> TcPluginM (Maybe Ct)
-logToErr Log{..} = Just <$> mkWanted log_loc log_pred_ty
-logToErr _ = return Nothing
 
 data PluginTyCons = PTC { ptc_default :: TyCon
                         , ptc_promote :: TyCon
