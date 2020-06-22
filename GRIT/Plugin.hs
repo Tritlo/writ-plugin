@@ -376,10 +376,12 @@ solveMsg flags@Flags{..} PTC{..} ct =
       case splitTyConApp_maybe ty1 of
         Just (tc, [msg]) | tc == ptc_msg -> do
           let ev = mkProof "grit-msg" ty1 ty2
+          -- We convert the message to a type error, so that GHC will print
+          -- it nicely whether as a warning or error message.
           ty_err <- flip mkTyConApp [k1, msg] <$>
                       tcLookupTyCon errorMessageTypeErrorFamName
-          checks <- if not f_no_msg then return [] else
-                      pure <$> mkWanted (ctLoc ct) ty_err
+          checks <- if not f_no_msg then return []
+                    else pure <$> mkWanted (ctLoc ct) ty_err
           let logs = if f_quiet then Set.empty
                      else Set.singleton (Log ty_err (ctLoc ct))
           couldSolve (Just (ev, ct)) checks logs
