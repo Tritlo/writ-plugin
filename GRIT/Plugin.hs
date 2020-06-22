@@ -195,9 +195,9 @@ gritPlugin opts = TcPlugin initialize solve stop
                                       logs `Set.union` new_logs))
            order :: [(SolveFun, String)]
            order = [ (solveDefault,   "Defaulting")
-                   , (solveDischarge, "Discharging")
                    , (solveOnlyIf,    "OnlyIffing")
                    , (solveMsg,       "Messaging")
+                   , (solveDischarge, "Discharging")
                    , (solveIgnore,    "Ignoring") ]
            to_check = wanted ++ derived
        (_, (solved_wanteds, more_cts, logs)) <-
@@ -309,7 +309,7 @@ solveIgnore _ _ ct = wontSolve ct
 -- Coercible.
 solveDischarge :: SolveFun
 solveDischarge flags@Flags{..} ptc@PTC{..} ct =
-  case splitPrimEquality (ctPred ct) of
+  case splitEquality (ctPred ct) of
     Just (k1,ty1,ty2) -> do
       famRes <- matchFam ptc_discharge [k1, ty1, ty2]
       let (might, can't) = (return famRes, return Nothing)
@@ -343,13 +343,13 @@ checkMsg :: Ct -> Type -> TcPluginM Ct
 checkMsg ct msg =  do
   name <- flip mkSystemName (mkTyVarOcc "msg") <$> newUnique
   msg_var <- unsafeTcPluginTcM $ newSkolemTyVar name (typeKind msg)
-  let eq_ty = mkPrimEqPredRole Nominal msg (mkTyVarTy msg_var)
+  let eq_ty = mkCoercionType Nominal msg (mkTyVarTy msg_var)
   mkWanted (ctLoc ct) eq_ty
 
 
 solveOnlyIf :: SolveFun
 solveOnlyIf _ PTC{..} ct =
-  case splitPrimEquality (ctPred ct) of
+  case splitEquality (ctPred ct) of
     Just (k1,ty1,ty2) -> do
         -- As an optimization to avoid the constraint solver having to do too
         -- many loops, we unwrap any nested OnlyIfs here, and gather all the
@@ -357,7 +357,7 @@ solveOnlyIf _ PTC{..} ct =
         case reverse (unwrapOnlyIfs ty1) of
           [_] -> wontSolve ct
           (msg:cons) -> do
-            let eq_ty = mkPrimEqPredRole Nominal msg ty2
+            let eq_ty = mkCoercionType Nominal msg ty2
                 ev = mkProof "grit-only-if" ty1 ty2
             check_msg <- mkWanted (ctLoc ct) eq_ty
             check_cons <- mapM (mkWanted (ctLoc ct)) cons
@@ -371,7 +371,7 @@ solveOnlyIf _ PTC{..} ct =
 
 solveMsg :: SolveFun
 solveMsg flags@Flags{..} PTC{..} ct =
-  case splitPrimEquality (ctPred ct) of
+  case splitEquality (ctPred ct) of
     Just (k1,ty1,ty2) -> do
       case splitTyConApp_maybe ty1 of
         Just (tc, [msg]) | tc == ptc_msg -> do
@@ -401,10 +401,10 @@ mkGiven loc eq_ty ev = flip setCtLoc loc . CNonCanonical <$> newGiven loc eq_ty 
 mkProof :: String -> Type -> Type -> EvTerm
 mkProof str ty1 ty2 = evCoercion $ mkUnivCo (PluginProv str) Nominal ty1 ty2
 
-splitPrimEquality :: Type -> Maybe (Kind, Type, Type)
-splitPrimEquality pred =
+splitEquality :: Type -> Maybe (Kind, Type, Type)
+splitEquality pred =
   do (tyCon, [k1, k2, ty1,ty2]) <- splitTyConApp_maybe pred
-     guard (getUnique tyCon == eqPrimTyConKey)
+     guard (tyCon == eqPrimTyCon)
      guard (k1 `eqType` k2)
      return (k1, ty1,ty2)
 
