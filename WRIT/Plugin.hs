@@ -253,8 +253,8 @@ getPluginTyCons =
                 ptc_discharge  <- getTyCon mod "Discharge"
                 ptc_promote <- getTyCon mod "Promote"
                 ptc_ignore  <- getTyCon mod "Ignore"
-                ptc_only_if <- getTyCon mod "OnlyIf"
                 ptc_msg     <- getPromDataCon mod "Msg"
+                ptc_only_if <- getPromDataCon mod "OnlyIf"
                 return PTC{..}
          NoPackage uid -> pprPanic "Plugin module not found (no package)!" (ppr uid)
          FoundMultiple ms -> pprPanic "Multiple plugin modules found!" (ppr ms)

@@ -5,7 +5,7 @@
 {-# LANGUAGE UndecidableInstances #-}
 module WRIT.Configure (
         Default, Promote, Ignore, Discharge,
-        Message(..), OnlyIf, TypeError(..), ErrorMessage(..),
+        Message(..), TypeError(..), ErrorMessage(..),
 ) where
 
 import GHC.TypeLits (TypeError(..),ErrorMessage(..))
@@ -15,6 +15,9 @@ import Data.Coerce (Coercible)
 -- We give the new name Message to reflect that these can also appear
 -- in warnings when using GRIT, and the same with Msg for TypeError.
 data Message = Msg ErrorMessage
+                -- OnlyIf can be used to communicate additional constraints on
+                -- promotions, discharges, and ignores.
+             | OnlyIf Constraint Message
 
 -- Default means that if we have an ambiguous l1 of kind k, we can default it to
 -- be the rhs, i.e. type family Default Label = L would default all
@@ -33,17 +36,12 @@ type family Ignore (c :: Constraint) :: Message
 -- if m holds.
 type family Discharge (a :: k) (b :: k) :: Message
 
-
 -- Promote means that if we have a value (True :: Bool), we can promote it to b
 -- Note that Promote a b requires Coercible a b, otherwise a Coercible error
 -- will be produced.
 type family Promote (a :: *) (b :: *) :: Message
 
 -- We require that Discharge (a :: *) (b :: *) to be Promote a b for any a,b.
-type instance Discharge (a :: *) (b :: *) =
-    OnlyIf (Coercible a b) (Promote a b)
+type instance Discharge (a :: *) (b :: *) = OnlyIf (Coercible a b) (Promote a b)
 
--- OnlyIf can be used to communicate additional constraints on promotions,
--- discharges, and ignores.
-type family OnlyIf (c :: Constraint) (m :: Message) :: Message
 
