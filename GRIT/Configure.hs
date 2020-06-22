@@ -5,8 +5,7 @@
 {-# LANGUAGE UndecidableInstances #-}
 module GRIT.Configure (
         Default, Promote, Ignore, Discharge,
-        Report, Message, Msg, OnlyIf,
-        TypeError(..), ErrorMessage(..),
+        Message, Msg, OnlyIf, TypeError(..), ErrorMessage(..),
 ) where
 
 import GHC.TypeLits (TypeError(..),ErrorMessage(..))
@@ -16,10 +15,6 @@ import Data.Coerce (Coercible)
 -- We give the new name Message to reflect that these can also appear
 -- in warnings when using GRIT, and the same with Msg for TypeError.
 type Message = ErrorMessage
-
-type family Msg (m :: Message) :: Message where
-  Msg m = TypeError m
-
 
 -- Default means that if we have an ambiguous l1 of kind k, we can default it to
 -- be the rhs, i.e. type family Default Label = L would default all
@@ -50,10 +45,8 @@ type instance Discharge (a :: *) (b :: *) =
 
 -- OnlyIf can be used to communicate additional constraints on promotions,
 -- discharges, and ignores.
-type family OnlyIf (c :: Constraint) (m :: Message) :: Message where
-  OnlyIf k m = m
+type family OnlyIf (c :: Constraint) (m :: Message) :: Message
 
--- Report is a class we use to wrap messages so that they can either be returned
--- as a type error or reported as a warning (after any type families within have
--- been computed).
-class Report (err :: Message) where
+-- Msg is the type family that handles the messaging, and is either turned
+-- into a warning or type error depending on the flags.
+type family Msg (m :: Message) :: Message

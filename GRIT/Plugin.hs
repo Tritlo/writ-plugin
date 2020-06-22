@@ -17,6 +17,8 @@ import Data.Function (on)
 import Data.Kind (Constraint)
 import Data.Data (Data, toConstr)
 import Prelude hiding ((<>))
+import qualified Data.Set as Set
+import Data.Set (Set)
 
 import GHC.TypeLits(TypeError(..), ErrorMessage(..))
 
@@ -27,7 +29,7 @@ import GHC.Tc.Plugin
 import GHC.Tc.Types
 import GHC.Tc.Types.Evidence
 import GHC.Tc.Types.Constraint
-import GHC.Tc.Utils.TcMType (fillCoercionHole)
+import GHC.Tc.Utils.TcMType hiding (newWanted)
 
 
 import GHC.Core.TyCo.Rep
@@ -57,7 +59,7 @@ import Class
 import Inst hiding (newWanted)
 
 import MkId
-import TcMType (fillCoercionHole)
+import TcMType hiding (newWanted)
 
 import TcType
 import CoAxiom
@@ -145,27 +147,29 @@ addWarning dflags log = warn (ppr log)
 
 data Flags = Flags { f_debug        :: Bool
                    , f_quiet        :: Bool
+                   , f_no_default   :: Bool
                    , f_no_ignore    :: Bool
                    , f_no_promote   :: Bool
-                   , f_no_default   :: Bool
-                   , f_no_report    :: Bool
-                   , f_no_discharge :: Bool }
+                   , f_no_discharge :: Bool
+                   , f_no_only_if   :: Bool
+                   , f_no_msg       :: Bool }
 
 getFlags :: [CommandLineOption] -> Flags
 getFlags opts = Flags { f_debug        = "debug"          `elem` opts
                       , f_quiet        = "quiet"          `elem` opts
-                      , f_no_report    = "no-report"      `elem` opts
-                      , f_no_ignore    = "no-ignore"      `elem` opts
-                      , f_no_promote   = "no-promote"     `elem` opts
                       , f_no_default   = "no-default"     `elem` opts
-                      , f_no_discharge = "no-discharge"   `elem` opts }
+                      , f_no_ignore    = "no-ignore"      `elem` opts
+                      , f_no_discharge = "no-discharge"   `elem` opts
+                      , f_no_promote   = "no-promote"     `elem` opts
+                      , f_no_only_if   = "no-only-if"     `elem` opts
+                      , f_no_msg       = "no-msg"         `elem` opts }
 
 gritPlugin :: [CommandLineOption] -> TcPlugin
 gritPlugin opts = TcPlugin initialize solve stop
   where
     flags@Flags{..} = getFlags opts
-    initialize = tcPluginIO $ newIORef []
-    solve :: IORef [Log] -> [Ct] -> [Ct] -> [Ct] -> TcPluginM TcPluginResult
+    initialize = tcPluginIO $ newIORef Set.empty
+    solve :: IORef (Set Log) -> [Ct] -> [Ct] -> [Ct] -> TcPluginM TcPluginResult
     solve warns given derived wanted = do
        dflags <- unsafeTcPluginTcM getDynFlags
        let pprDebug :: Outputable a => String -> a -> TcPluginM ()
@@ -178,8 +182,8 @@ gritPlugin opts = TcPlugin initialize solve stop
        mapM_ (pprDebug "Wanted:") wanted
        pprDebug "-------" empty
        pluginTyCons <- getPluginTyCons
-       let solveWFun :: ([Ct], ([(EvTerm, Ct)],[Ct],[Log])) -> (SolveFun, String)
-                     -> TcPluginM ([Ct], ([(EvTerm, Ct)],[Ct],[Log]))
+       let solveWFun :: ([Ct], ([(EvTerm, Ct)],[Ct], Set Log)) -> (SolveFun, String)
+                     -> TcPluginM ([Ct], ([(EvTerm, Ct)],[Ct], Set Log))
            solveWFun (unsolved, (solved, more, logs)) (solveFun, explain) = do
              (still_unsolved, (new_solved, new_more, new_logs)) <-
                inspectSol <$> mapM (solveFun flags pluginTyCons) unsolved
@@ -188,27 +192,28 @@ gritPlugin opts = TcPlugin initialize solve stop
              mapM_ (pprDebug (explain ++ "-logs")) new_logs
              return (still_unsolved, (solved ++ new_solved,
                                       more ++ new_more,
-                                      logs ++ new_logs))
+                                      logs `Set.union` new_logs))
            order :: [(SolveFun, String)]
-           order = [ (solveReport,    "Reporting")
-                   , (solveDefault,   "Defaulting")
+           order = [ (solveDefault,   "Defaulting")
                    , (solveDischarge, "Discharging")
+                   , (solveOnlyIf,    "OnlyIffing")
+                   , (solveMsg,       "Messaging")
                    , (solveIgnore,    "Ignoring") ]
            to_check = wanted ++ derived
        (_, (solved_wanteds, more_cts, logs)) <-
-          foldM solveWFun (to_check, ([],[],[])) order
-       tcPluginIO $ modifyIORef warns (logs ++)
+          foldM solveWFun (to_check, ([],[],Set.empty)) order
+       tcPluginIO $ modifyIORef warns (logs `Set.union`)
        return $ TcPluginOk solved_wanteds more_cts
-    stop warns =
-      do dflags <- unsafeTcPluginTcM getDynFlags
-         tcPluginIO $ readIORef warns >>= mapM_ (addWarning dflags) . sort . nub
+    stop warns = do dflags <- unsafeTcPluginTcM getDynFlags
+                    tcPluginIO $ readIORef warns >>=
+                      mapM_ (addWarning dflags) . Set.toAscList
 
 data PluginTyCons = PTC { ptc_default :: TyCon
                         , ptc_promote :: TyCon
                         , ptc_only_if :: TyCon
                         , ptc_ignore  :: TyCon
-                        , ptc_report  :: TyCon
-                        , ptc_discharge  :: TyCon }
+                        , ptc_discharge  :: TyCon
+                        , ptc_msg :: TyCon }
 
 getPluginTyCons :: TcPluginM PluginTyCons
 getPluginTyCons =
@@ -219,8 +224,8 @@ getPluginTyCons =
                 ptc_discharge  <- getTyCon mod "Discharge"
                 ptc_promote <- getTyCon mod "Promote"
                 ptc_ignore  <- getTyCon mod "Ignore"
-                ptc_report  <- getTyCon mod "Report"
                 ptc_only_if <- getTyCon mod "OnlyIf"
+                ptc_msg     <- getTyCon mod "Msg"
                 return PTC{..}
          NoPackage uid -> pprPanic "Plugin module not found (no package)!" (ppr uid)
          FoundMultiple ms -> pprPanic "Multiple plugin modules found!" (ppr ms)
@@ -230,14 +235,14 @@ getPluginTyCons =
 
 type Solution = Either Ct (Maybe (EvTerm, Ct), -- The solution to the Ct
                            [Ct],               -- Possible additional work
-                           [Log])              -- What we did
+                           Set Log)              -- What we did
 
 type SolveFun = Flags -> PluginTyCons -> Ct -> TcPluginM Solution
 
 wontSolve :: Ct -> TcPluginM Solution
 wontSolve = return . Left
 
-couldSolve :: Maybe (EvTerm,Ct) -> [Ct] -> [Log] -> TcPluginM Solution
+couldSolve :: Maybe (EvTerm,Ct) -> [Ct] -> Set Log -> TcPluginM Solution
 couldSolve ev work logs = return (Right (ev,work,logs))
 
 
@@ -264,7 +269,8 @@ solveDefault Flags{..} ptc@PTC{..} ct =
       -- mention a meta type variable in a given.
       do let (eq_tys, logs) = unzip $ map mkTyEq defaults
          assert_eqs <- mapM mkAssert eq_tys
-         couldSolve Nothing assert_eqs (if f_quiet then [] else logs)
+         couldSolve Nothing assert_eqs (if f_quiet then Set.empty
+                                        else Set.fromList logs)
    where mkAssert :: Either PredType (Type, EvExpr) -> TcPluginM Ct
          mkAssert = either (mkDerived bump) (uncurry (mkGiven bump))
          nonStar = filter (not . tcIsLiftedTypeKind . varType)
@@ -288,14 +294,14 @@ solveDefault Flags{..} ptc@PTC{..} ct =
 solveIgnore :: SolveFun
 solveIgnore Flags{..} _ ct | f_no_ignore = wontSolve ct
 solveIgnore _ _ ct@CDictCan{..} | not (null $ classMethods cc_class) = wontSolve ct
-solveIgnore flags@Flags{..} ptc@PTC{..} ct@CDictCan{..} = do
+solveIgnore _ PTC{..} ct@CDictCan{..} = do
   res <- matchFam ptc_ignore [ctPred ct]
   case res of
     Nothing -> wontSolve ct
     Just (_, rhs) -> do
       let classCon = tyConSingleDataCon (classTyCon cc_class)
-      checks <- checkMsg flags ptc ct rhs
-      couldSolve (Just (evDataConApp classCon cc_tyargs [], ct)) checks []
+      msg_check <- checkMsg ct rhs
+      couldSolve (Just (evDataConApp classCon cc_tyargs [], ct)) [msg_check] Set.empty
 solveIgnore _ _ ct = wontSolve ct
 
 -- Solves Γ |- (a :: k) ~ (b :: k) if Γ |- Discharge a b ~ m and  Γ |- m.
@@ -303,9 +309,8 @@ solveIgnore _ _ ct = wontSolve ct
 -- Coercible.
 solveDischarge :: SolveFun
 solveDischarge flags@Flags{..} ptc@PTC{..} ct =
-  case splitTyConApp_maybe (ctPred ct) of
-    Just (tyCon, [k1,k2,ty1,ty2]) | getUnique tyCon == eqPrimTyConKey
-                                    && k1 `eqType` k2 -> do
+  case splitPrimEquality (ctPred ct) of
+    Just (k1,ty1,ty2) -> do
       famRes <- matchFam ptc_discharge [k1, ty1, ty2]
       let (might, can't) = (return famRes, return Nothing)
       canSolve <-
@@ -327,57 +332,59 @@ solveDischarge flags@Flags{..} ptc@PTC{..} ct =
       case canSolve of
         Nothing -> wontSolve ct
         Just (_, msg) -> do
-          checks <- checkMsg flags ptc ct msg
-          couldSolve (Just (mkProof "grit-equal" ty1 ty2, ct)) checks []
+          msg_check <- checkMsg ct msg
+          couldSolve (Just (mkProof "grit-discharge" ty1 ty2, ct)) [msg_check] Set.empty
     _ -> wontSolve ct
 
 
--- Note that we use checkMsg before we return it to the type checker again,
--- since this way we can have the type checker "solve" the messages by applying
--- the closed type familes Msg and OnlyIf, after we've extracted the additional
--- checks we have to do. To simplify, we always wrap messages in a report.
--- If these reports end up going unsolved (i.e. with the -no-report flag), then
--- we unwrap the report in solveReport and check the message.
-checkMsg :: Flags -> PluginTyCons -> Ct -> Type -> TcPluginM [Ct]
-checkMsg flags ptc ct msg =
-  do report <- newReport flags ptc ct msg
-     additional_constraints <- checkOnlyIf ptc (ctLoc ct) msg
-     return (report:additional_constraints)
+-- checkMsg generates a `msg ~ msg0` constraint that we can solve, and
+-- if neccesary, output a message for.
+checkMsg :: Ct -> Type -> TcPluginM Ct
+checkMsg ct msg =  do
+  name <- flip mkSystemName (mkTyVarOcc "msg") <$> newUnique
+  msg_var <- unsafeTcPluginTcM $ newSkolemTyVar name (typeKind msg)
+  let eq_ty = mkPrimEqPredRole Nominal msg (mkTyVarTy msg_var)
+  mkWanted (ctLoc ct) eq_ty
 
--- Additional constraints allow users to specify additional constraints for
--- promotions and discharges.
-checkOnlyIf :: PluginTyCons -> CtLoc -> Type -> TcPluginM [Ct]
-checkOnlyIf ptc@PTC{..} loc msg =
-  case splitTyConApp_maybe msg of
-    Just (tc, [constraint,nested]) | tc == ptc_only_if ->
-      do c <- mkWanted (bumpCtLocDepth loc) constraint
-         more <- checkOnlyIf ptc loc nested
-         return (c:more)
-    -- We want to look throught type families here, such as in the
-    -- Discharge (a :: *) (b :: *) case.
-    Just (tc, args) ->
-        do match <- matchFam tc args
-           case match of
-              Just (_, nested) -> checkOnlyIf ptc loc nested
-              _ -> return []
-    _ -> return []
 
--- Solve Report is our way of computing whatever type familes that might be in
--- a given type error before emitting it as a warning or error depending on
--- which flags are set. Solves  Γ |- Report m by either requiring  Γ |- m
--- (which is a type error) or by emitting a warning.
-solveReport :: SolveFun
-solveReport Flags{..} ptc@PTC{..} ct =
-   case splitTyConApp_maybe (ctPred ct) of
-      Just r@(tyCon, [msg]) | getName tyCon == getName ptc_report -> do
-        let ev = Just (evDataConApp (tyConSingleDataCon tyCon) [msg] [], ct)
-            logs = [Log msg (ctLoc ct)]
-        if f_no_report
-        then do ty_err <- mkWanted (ctLoc ct) msg
-                couldSolve ev [ty_err] []
-        else couldSolve ev [] (if f_quiet then [] else logs)
-      _ -> wontSolve ct
+solveOnlyIf :: SolveFun
+solveOnlyIf _ PTC{..} ct =
+  case splitPrimEquality (ctPred ct) of
+    Just (k1,ty1,ty2) -> do
+        -- As an optimization to avoid the constraint solver having to do too
+        -- many loops, we unwrap any nested OnlyIfs here, and gather all the
+        -- constraints.
+        case reverse (unwrapOnlyIfs ty1) of
+          [_] -> wontSolve ct
+          (msg:cons) -> do
+            let eq_ty = mkPrimEqPredRole Nominal msg ty2
+                ev = mkProof "grit-only-if" ty1 ty2
+            check_msg <- mkWanted (ctLoc ct) eq_ty
+            check_cons <- mapM (mkWanted (ctLoc ct)) cons
+            couldSolve (Just (ev, ct)) (check_msg:check_cons) Set.empty
+          _ -> wontSolve ct
+    _ -> wontSolve ct
+  where unwrapOnlyIfs msg = case splitTyConApp_maybe msg of
+                             Just (tc, [con, nested]) | tc == ptc_only_if ->
+                                (con:unwrapOnlyIfs nested)
+                             _ -> [msg]
 
+solveMsg :: SolveFun
+solveMsg flags@Flags{..} PTC{..} ct =
+  case splitPrimEquality (ctPred ct) of
+    Just (k1,ty1,ty2) -> do
+      case splitTyConApp_maybe ty1 of
+        Just (tc, [msg]) | tc == ptc_msg -> do
+          let ev = mkProof "grit-msg" ty1 ty2
+          ty_err <- flip mkTyConApp [k1, msg] <$>
+                      tcLookupTyCon errorMessageTypeErrorFamName
+          checks <- if not f_no_msg then return [] else
+                      pure <$> mkWanted (ctLoc ct) ty_err
+          let logs = if f_quiet then Set.empty
+                     else Set.singleton (Log ty_err (ctLoc ct))
+          couldSolve (Just (ev, ct)) checks logs
+        _ -> wontSolve ct
+    _ -> wontSolve ct
 
 -- Utils
 mkDerived :: CtLoc -> PredType -> TcPluginM Ct
@@ -389,17 +396,18 @@ mkWanted loc eq_ty = flip setCtLoc loc . CNonCanonical <$> newWanted loc eq_ty
 mkGiven :: CtLoc -> PredType -> EvExpr -> TcPluginM Ct
 mkGiven loc eq_ty ev = flip setCtLoc loc . CNonCanonical <$> newGiven loc eq_ty ev
 
-newReport :: Flags -> PluginTyCons -> Ct -> PredType -> TcPluginM Ct
-newReport Flags{..} PTC{..} ct msg =
-       do report <- CNonCanonical <$> newWanted (ctLoc ct) rep
-          return $ report `setCtLoc` ctLoc ct
-  where rep = mkTyConApp ptc_report [msg]
-
-
 mkProof :: String -> Type -> Type -> EvTerm
 mkProof str ty1 ty2 = evCoercion $ mkUnivCo (PluginProv str) Nominal ty1 ty2
 
-inspectSol :: [Either a (Maybe b, [c], [d])] -> ([a], ([b], [c], [d]))
-inspectSol xs = (ls, (catMaybes sols, concat more, concat logs))
+splitPrimEquality :: Type -> Maybe (Kind, Type, Type)
+splitPrimEquality pred =
+  do (tyCon, [k1, k2, ty1,ty2]) <- splitTyConApp_maybe pred
+     guard (getUnique tyCon == eqPrimTyConKey)
+     guard (k1 `eqType` k2)
+     return (k1, ty1,ty2)
+
+inspectSol :: Ord d => [Either a (Maybe b, [c], Set d)]
+           -> ([a], ([b], [c], Set d))
+inspectSol xs = (ls, (catMaybes sols, concat more, Set.unions logs))
   where (ls, rs) = partitionEithers xs
         (sols, more, logs) = unzip3 rs
