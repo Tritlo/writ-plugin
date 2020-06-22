@@ -29,7 +29,7 @@ import GHC.Tc.Plugin
 import GHC.Tc.Types
 import GHC.Tc.Types.Evidence
 import GHC.Tc.Types.Constraint
-import GHC.Tc.Utils.TcMType hiding (newWanted)
+import GHC.Tc.Utils.TcMType hiding (newWanted, newFlexiTyVar, zonkTcType)
 
 
 import GHC.Core.TyCo.Rep
@@ -59,7 +59,7 @@ import Class
 import Inst hiding (newWanted)
 
 import MkId
-import TcMType hiding (newWanted)
+import TcMType hiding (newWanted, newFlexiTyVar, zonkTcType)
 
 import TcType
 import CoAxiom
@@ -116,7 +116,6 @@ instance Eq Log where
        ((==) `on` logSrc) a b && (eqType `on` log_pred_ty) a b
                               && ((==) `on` log_var) a b
 
-
 instance Outputable Log where
    -- We do some extra work to pretty print the Defaulting messages
    ppr Log{..} =
@@ -136,8 +135,12 @@ instance Outputable Log where
       where printFlav Given = "Will default"
             printFlav _ = "Defaulting"
 
-addWarning :: DynFlags -> Log -> IO()
-addWarning dflags log = warn (ppr log)
+zonkLog :: Log -> TcPluginM Log
+zonkLog log = do zonked <- zonkTcType (log_pred_ty log)
+                 return $ log{log_pred_ty=zonked}
+
+addWarning :: DynFlags -> Log -> TcPluginM ()
+addWarning dflags log = tcPluginIO $ warn (ppr log)
   where warn = putLogMsg dflags NoReason SevWarning
 #if __GLASGOW_HASKELL__ > 810
                  (RealSrcSpan (logSrc log) Nothing)
@@ -147,22 +150,22 @@ addWarning dflags log = warn (ppr log)
 
 data Flags = Flags { f_debug        :: Bool
                    , f_quiet        :: Bool
+                   , f_keep_errors  :: Bool
                    , f_no_default   :: Bool
                    , f_no_ignore    :: Bool
                    , f_no_promote   :: Bool
                    , f_no_discharge :: Bool
-                   , f_no_only_if   :: Bool
-                   , f_no_msg       :: Bool }
+                   , f_no_only_if   :: Bool }
 
 getFlags :: [CommandLineOption] -> Flags
 getFlags opts = Flags { f_debug        = "debug"          `elem` opts
                       , f_quiet        = "quiet"          `elem` opts
+                      , f_keep_errors  = "keep-errors"    `elem` opts
                       , f_no_default   = "no-default"     `elem` opts
                       , f_no_ignore    = "no-ignore"      `elem` opts
                       , f_no_discharge = "no-discharge"   `elem` opts
                       , f_no_promote   = "no-promote"     `elem` opts
-                      , f_no_only_if   = "no-only-if"     `elem` opts
-                      , f_no_msg       = "no-msg"         `elem` opts }
+                      , f_no_only_if   = "no-only-if"     `elem` opts }
 
 gritPlugin :: [CommandLineOption] -> TcPlugin
 gritPlugin opts = TcPlugin initialize solve stop
@@ -195,18 +198,25 @@ gritPlugin opts = TcPlugin initialize solve stop
                                       logs `Set.union` new_logs))
            order :: [(SolveFun, String)]
            order = [ (solveDefault,   "Defaulting")
-                   , (solveOnlyIf,    "OnlyIffing")
-                   , (solveMsg,       "Messaging")
+                   , (solveOnlyIf,    "OnlyIf")
                    , (solveDischarge, "Discharging")
                    , (solveIgnore,    "Ignoring") ]
            to_check = wanted ++ derived
        (_, (solved_wanteds, more_cts, logs)) <-
           foldM solveWFun (to_check, ([],[],Set.empty)) order
-       tcPluginIO $ modifyIORef warns (logs `Set.union`)
-       return $ TcPluginOk solved_wanteds more_cts
+       ty_errs <- if f_keep_errors
+                  then catMaybes <$> mapM logToErr (Set.toAscList logs)
+                  else do tcPluginIO $ modifyIORef warns (logs `Set.union`)
+                          return []
+       return $ TcPluginOk solved_wanteds (ty_errs ++ more_cts)
     stop warns = do dflags <- unsafeTcPluginTcM getDynFlags
-                    tcPluginIO $ readIORef warns >>=
-                      mapM_ (addWarning dflags) . Set.toAscList
+                    logs <- Set.toAscList <$> tcPluginIO (readIORef warns)
+                    zonked_logs <- mapM zonkLog logs
+                    when (not f_quiet) $ mapM_ (addWarning dflags) zonked_logs
+
+logToErr :: Log -> TcPluginM (Maybe Ct)
+logToErr Log{..} = Just <$> mkWanted log_loc log_pred_ty
+logToErr _ = return Nothing
 
 data PluginTyCons = PTC { ptc_default :: TyCon
                         , ptc_promote :: TyCon
@@ -225,12 +235,14 @@ getPluginTyCons =
                 ptc_promote <- getTyCon mod "Promote"
                 ptc_ignore  <- getTyCon mod "Ignore"
                 ptc_only_if <- getTyCon mod "OnlyIf"
-                ptc_msg     <- getTyCon mod "Msg"
+                ptc_msg     <- getPromDataCon mod "Msg"
                 return PTC{..}
          NoPackage uid -> pprPanic "Plugin module not found (no package)!" (ppr uid)
          FoundMultiple ms -> pprPanic "Multiple plugin modules found!" (ppr ms)
          NotFound{..} -> pprPanic "Plugin module not found!" empty
   where getTyCon mod name = lookupOrig mod (mkTcOcc name) >>= tcLookupTyCon
+        getPromDataCon mod name = promoteDataCon <$>
+           (lookupOrig mod (mkDataOcc name) >>= tcLookupDataCon)
 
 
 type Solution = Either Ct (Maybe (EvTerm, Ct), -- The solution to the Ct
@@ -269,8 +281,7 @@ solveDefault Flags{..} ptc@PTC{..} ct =
       -- mention a meta type variable in a given.
       do let (eq_tys, logs) = unzip $ map mkTyEq defaults
          assert_eqs <- mapM mkAssert eq_tys
-         couldSolve Nothing assert_eqs (if f_quiet then Set.empty
-                                        else Set.fromList logs)
+         couldSolve Nothing assert_eqs (Set.fromList logs)
    where mkAssert :: Either PredType (Type, EvExpr) -> TcPluginM Ct
          mkAssert = either (mkDerived bump) (uncurry (mkGiven bump))
          nonStar = filter (not . tcIsLiftedTypeKind . varType)
@@ -294,14 +305,15 @@ solveDefault Flags{..} ptc@PTC{..} ct =
 solveIgnore :: SolveFun
 solveIgnore Flags{..} _ ct | f_no_ignore = wontSolve ct
 solveIgnore _ _ ct@CDictCan{..} | not (null $ classMethods cc_class) = wontSolve ct
-solveIgnore _ PTC{..} ct@CDictCan{..} = do
+solveIgnore _ ptc@PTC{..} ct@CDictCan{..} = do
   res <- matchFam ptc_ignore [ctPred ct]
   case res of
     Nothing -> wontSolve ct
     Just (_, rhs) -> do
       let classCon = tyConSingleDataCon (classTyCon cc_class)
-      msg_check <- checkMsg ct rhs
-      couldSolve (Just (evDataConApp classCon cc_tyargs [], ct)) [msg_check] Set.empty
+      (msg_check, msg_var) <- checkMsg ptc ct rhs
+      let log = Set.singleton (Log msg_var (ctLoc ct))
+      couldSolve (Just (evDataConApp classCon cc_tyargs [], ct)) [msg_check] log
 solveIgnore _ _ ct = wontSolve ct
 
 -- Solves Γ |- (a :: k) ~ (b :: k) if Γ |- Discharge a b ~ m and  Γ |- m.
@@ -332,19 +344,21 @@ solveDischarge flags@Flags{..} ptc@PTC{..} ct =
       case canSolve of
         Nothing -> wontSolve ct
         Just (_, msg) -> do
-          msg_check <- checkMsg ct msg
-          couldSolve (Just (mkProof "grit-discharge" ty1 ty2, ct)) [msg_check] Set.empty
+          (msg_check, msg_var) <- checkMsg ptc ct msg
+          let log = Set.singleton (Log msg_var (ctLoc ct))
+          couldSolve (Just (mkProof "grit-discharge" ty1 ty2, ct)) [msg_check] log
     _ -> wontSolve ct
 
-
--- checkMsg generates a `msg ~ msg0` constraint that we can solve, and
--- if neccesary, output a message for.
-checkMsg :: Ct -> Type -> TcPluginM Ct
-checkMsg ct msg =  do
-  name <- flip mkSystemName (mkTyVarOcc "msg") <$> newUnique
-  msg_var <- unsafeTcPluginTcM $ newSkolemTyVar name (typeKind msg)
-  let eq_ty = mkCoercionType Nominal msg (mkTyVarTy msg_var)
-  mkWanted (ctLoc ct) eq_ty
+-- checkMsg generates a `m ~ Msg m0` constraint that we can solve, which unifies
+-- the type variable m0 with whatever the resulting type error message is.
+checkMsg :: PluginTyCons -> Ct -> Type -> TcPluginM (Ct, Type)
+checkMsg PTC{..} ct msg =  do
+  err_msg_kind <- flip mkTyConApp [] <$> getErrMsgCon
+  ty_var <- mkTyVarTy <$> newFlexiTyVar err_msg_kind
+  let eq_ty = mkCoercionType Nominal msg (mkTyConApp ptc_msg [ty_var])
+  ct <- mkWanted (ctLoc ct) eq_ty
+  ty_err <- mkTyErr ty_var
+  return (ct, ty_err)
 
 
 solveOnlyIf :: SolveFun
@@ -369,25 +383,12 @@ solveOnlyIf _ PTC{..} ct =
                                 (con:unwrapOnlyIfs nested)
                              _ -> [msg]
 
-solveMsg :: SolveFun
-solveMsg flags@Flags{..} PTC{..} ct =
-  case splitEquality (ctPred ct) of
-    Just (k1,ty1,ty2) -> do
-      case splitTyConApp_maybe ty1 of
-        Just (tc, [msg]) | tc == ptc_msg -> do
-          let ev = mkProof "grit-msg" ty1 ty2
-          -- We convert the message to a type error, so that GHC will print
-          -- it nicely whether as a warning or error message.
-          ty_err <- flip mkTyConApp [k1, msg] <$>
-                      tcLookupTyCon errorMessageTypeErrorFamName
-          checks <- if not f_no_msg then return []
-                    else pure <$> mkWanted (ctLoc ct) ty_err
-          let logs = if f_quiet then Set.empty
-                     else Set.singleton (Log ty_err (ctLoc ct))
-          couldSolve (Just (ev, ct)) checks logs
-        _ -> wontSolve ct
-    _ -> wontSolve ct
+mkTyErr ::  Type -> TcPluginM Type
+mkTyErr msg = flip mkTyConApp [typeKind msg, msg] <$>
+                 tcLookupTyCon errorMessageTypeErrorFamName
 
+getErrMsgCon :: TcPluginM TyCon
+getErrMsgCon = lookupOrig gHC_TYPELITS (mkTcOcc "ErrorMessage") >>= tcLookupTyCon
 -- Utils
 mkDerived :: CtLoc -> PredType -> TcPluginM Ct
 mkDerived loc eq_ty = flip setCtLoc loc . CNonCanonical <$> newDerived loc eq_ty

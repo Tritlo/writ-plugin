@@ -5,7 +5,7 @@
 {-# LANGUAGE UndecidableInstances #-}
 module GRIT.Configure (
         Default, Promote, Ignore, Discharge,
-        Message, Msg, OnlyIf, TypeError(..), ErrorMessage(..),
+        Message(..), OnlyIf, TypeError(..), ErrorMessage(..),
 ) where
 
 import GHC.TypeLits (TypeError(..),ErrorMessage(..))
@@ -14,7 +14,7 @@ import Data.Coerce (Coercible)
 
 -- We give the new name Message to reflect that these can also appear
 -- in warnings when using GRIT, and the same with Msg for TypeError.
-type Message = ErrorMessage
+data Message = Msg ErrorMessage
 
 -- Default means that if we have an ambiguous l1 of kind k, we can default it to
 -- be the rhs, i.e. type family Default Label = L would default all
@@ -47,6 +47,3 @@ type instance Discharge (a :: *) (b :: *) =
 -- discharges, and ignores.
 type family OnlyIf (c :: Constraint) (m :: Message) :: Message
 
--- Msg is the type family that handles the messaging, and is either turned
--- into a warning or type error depending on the flags.
-type family Msg (m :: Message) :: Message
