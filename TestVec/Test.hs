@@ -130,7 +130,6 @@ main = do print "Enter a list of numbers!"
           case forget n2 of
             [True, False] -> print "matched!"
             _ -> print "didn't match"
+          -- These won't compile
           -- print (safeHead (nil @Int))
           -- print (safeHead ([] @Int))
-
-
