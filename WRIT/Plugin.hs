@@ -4,9 +4,9 @@
 {-# LANGUAGE RecordWildCards #-}
 {-# LANGUAGE TupleSections #-}
 {-# LANGUAGE CPP #-}
-module GRIT.Plugin ( plugin, module GRIT.Configure ) where
+module WRIT.Plugin ( plugin, module WRIT.Configure ) where
 
-import GRIT.Configure
+import WRIT.Configure
 
 import Control.Monad (when, guard, foldM, zipWithM, msum)
 import Data.Maybe (mapMaybe, catMaybes, fromMaybe, fromJust, listToMaybe, isJust)
@@ -121,7 +121,7 @@ instance Outputable Log where
    ppr Log{..} =
         case userTypeError_maybe log_pred_ty of
            Just msg -> pprUserTypeErrorTy msg
-           _ -> text "GRIT" <+> ppr log_pred_ty
+           _ -> text "WRIT" <+> ppr log_pred_ty
    ppr LogDefault{..} = fsep [ text "Defaulting"
                                -- We want to print a instead of a0
                              , quotes (ppr (mkTyVarTy log_var)
@@ -193,7 +193,7 @@ gritPlugin opts = TcPlugin initialize solve stop
   where
     flags@Flags{..} = getFlags opts
     initialize = do
-      when f_debug $ tcPluginIO $ putStrLn "Starting GRIT in debug mode..."
+      when f_debug $ tcPluginIO $ putStrLn "Starting WRIT in debug mode..."
       when f_debug $ tcPluginIO $ print flags
       tcPluginIO $ newIORef Set.empty
     solve :: IORef (Set Log) -> [Ct] -> [Ct] -> [Ct] -> TcPluginM TcPluginResult
@@ -246,7 +246,7 @@ data PluginTyCons = PTC { ptc_default :: TyCon
 
 getPluginTyCons :: TcPluginM PluginTyCons
 getPluginTyCons =
-   do fpmRes <- findImportedModule (mkModuleName "GRIT.Configure") Nothing
+   do fpmRes <- findImportedModule (mkModuleName "WRIT.Configure") Nothing
       case fpmRes of
          Found _ mod  ->
              do ptc_default <- getTyCon mod "Default"

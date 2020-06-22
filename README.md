@@ -1,6 +1,6 @@
-The GRIT Plugin
+The WRIT Plugin
 ======
-Gradual Runtime-Irrelevant Typing
+Weak Runtime-Irrelevant Typing
 --------------------------------------------------------------------
 
 A type-checker plugin that allows users to "defaulting" a data kind to a value,
@@ -11,14 +11,14 @@ that GHC generates. However, when the `defer` flag is set, any such errors are
 converted into warnings, and if integrated with something likeghcide, you can
 even see the generated warnings inline in your editor:
 
-![A display of GRIT running with GHCIDE](.github/images/ghcide.png?raw=True "ghcide")
+![A display of WRIT running with GHCIDE](.github/images/ghcide.png?raw=True "ghcide")
 
 Example:
 
 ```haskell
-{-# OPTIONS_GHC -fplugin GRIT.Plugin
-                -fplugin-opt=GRIT.Plugin:debug
-                -fplugin-opt=GRIT.Plugin:defer
+{-# OPTIONS_GHC -fplugin WRIT.Plugin
+                -fplugin-opt=WRIT.Plugin:debug
+                -fplugin-opt=WRIT.Plugin:defer
                 -dcore-lint
                  #-}
 -- Plugin:
@@ -34,7 +34,7 @@ Example:
 module Main (main) where
 
 
-import GRIT.Configure (Default, Promote, Ignore, Relate)
+import WRIT.Configure (Default, Promote, Ignore, Relate)
 import GHC.TypeLits (TypeError(..),ErrorMessage(..))
 
 data Label = L | H deriving (Show)

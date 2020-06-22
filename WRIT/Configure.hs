@@ -3,7 +3,7 @@
 {-# LANGUAGE ConstraintKinds #-}
 {-# LANGUAGE TypeFamilies #-}
 {-# LANGUAGE UndecidableInstances #-}
-module GRIT.Configure (
+module WRIT.Configure (
         Default, Promote, Ignore, Discharge,
         Message(..), OnlyIf, TypeError(..), ErrorMessage(..),
 ) where

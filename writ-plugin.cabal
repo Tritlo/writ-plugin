@@ -1,19 +1,16 @@
-name: grit-plugin
+name: writ-plugin
 cabal-version: 1.24
 build-type: Simple
 version: 0.0.1
 author: Matthías Páll Gissurarson
 maintainer: mpg@mpg.is
-synopsis: Gadually type programs with runtime-irrelevant types
+synopsis: Weakly type programs with runtime-irrelevant types
 description:
 
-   The GRIT plugin allows somewhat automatic coercion of representationally
-   equivalent domains. By parametrizing the plugin with the Relate, Ignore,
+   The WRIT plugin allows somewhat automatic coercion of representationally
+   equivalent domains. By parametrizing the plugin with the Discharge, Ignore,
    Default, and Promote families, library authors can extend the type system
    of GHC to treat representationally equivalent data as nominally equivalent.
-   With the `-plugin-opt=GRIT.Plugin:defer` flag set, errors described by
-   these families are turned into warnings, allowing the users to compiler and
-   test their programs even in the presence of computationally irrelevant errors.
 
 category: Compiler Plugin
 license: MIT
@@ -25,9 +22,9 @@ library
                  ghc >= 8 && < 9,
                  containers >= 0.6 && < 0.7
   exposed-modules:
-    GRIT.Plugin,
-    GRIT.Configure
+    WRIT.Plugin,
+    WRIT.Configure
 
 Source-repository head
   Type:     git
-  Location: https://github.com/tritlo/grit-plugin.git
+  Location: https://github.com/tritlo/writ-plugin.git

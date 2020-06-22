@@ -1,5 +1,5 @@
-{-# OPTIONS_GHC -fplugin GRIT.Plugin -dcore-lint
-                -fplugin-opt=GRIT.Plugin:debug
+{-# OPTIONS_GHC -fplugin WRIT.Plugin -dcore-lint
+                -fplugin-opt=WRIT.Plugin:debug
  #-}
 -- Plugin:
 {-# LANGUAGE DataKinds #-}
@@ -15,7 +15,7 @@
 {-# LANGUAGE RoleAnnotations #-}
 module Main (main) where
 
-import GRIT.Configure
+import WRIT.Configure
 
 import GHC.TypeLits
 import Data.Proxy

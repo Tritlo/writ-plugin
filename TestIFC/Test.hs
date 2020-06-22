@@ -1,5 +1,5 @@
-{-# OPTIONS_GHC -fplugin GRIT.Plugin
-                -fplugin-opt=GRIT.Plugin:debug
+{-# OPTIONS_GHC -fplugin WRIT.Plugin
+                -fplugin-opt=WRIT.Plugin:debug
                 -dcore-lint #-}
 -- Plugin:
 {-# LANGUAGE DataKinds #-}
@@ -13,7 +13,7 @@
 module Main (main) where
 
 
-import GRIT.Configure
+import WRIT.Configure
 
 data Label = L | H deriving (Show)
 
