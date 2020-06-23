@@ -325,15 +325,16 @@ solveIgnore :: SolveFun
 solveIgnore Flags{..} _ ct | f_no_ignore = wontSolve ct
 solveIgnore _ _ ct@CDictCan{..} | not (null $ classMethods cc_class) = wontSolve ct
 solveIgnore _ ptc@PTC{..} ct@CDictCan{..} = do
-  res <- matchFam ptc_ignore [ctPred ct]
-  case res of
-    Nothing -> wontSolve ct
-    Just (_, rhs) -> do
-      let classCon = tyConSingleDataCon (classTyCon cc_class)
-      (msg_check, msg_var) <- checkMsg ptc ct rhs
-      let log = Set.singleton (Log msg_var (ctLoc ct))
-      couldSolve (Just (evDataConApp classCon cc_tyargs [], ct)) [msg_check] log
+  let ignore = mkTyConApp ptc_ignore [ctPred ct]
+  hasIgnore <- hasInst ignore
+  if not hasIgnore then wontSolve ct
+  else do (msg_check, msg_var) <- checkMsg ptc ct ignore
+          let log = Set.singleton (Log msg_var (ctLoc ct))
+              classCon = tyConSingleDataCon (classTyCon cc_class)
+              proof = evDataConApp classCon cc_tyargs []
+          couldSolve (Just (proof, ct)) [msg_check] log
 solveIgnore _ _ ct = wontSolve ct
+
 
 -- Solves Γ |- (a :: k) ~ (b :: k) if Γ |- Discharge a b ~ m and  Γ |- m.
 -- Promote is the same as Discharge, except we also require that a and b be
@@ -342,30 +343,25 @@ solveDischarge :: SolveFun
 solveDischarge flags@Flags{..} ptc@PTC{..} ct =
   case splitEquality (ctPred ct) of
     Just (k1,ty1,ty2) -> do
-      famRes <- matchFam ptc_discharge [k1, ty1, ty2]
-      let (might, can't) = (return famRes, return Nothing)
+      let discharge = mkTyConApp ptc_discharge [k1, ty1, ty2]
+          promote = mkTyConApp ptc_promote [ty1, ty2]
+      hasDischarge <- hasInst discharge
       canSolve <-
-        case famRes of
-          Nothing -> can't
+        case () of
+          _ | not hasDischarge-> return False
           -- If k is *, then we are doing a promotion, since the only
           -- instance of Discharge (a :: *) (b ::*) is for Promote.
-          _ | tcIsLiftedTypeKind k1 && f_no_promote -> can't
-          _ | tcIsLiftedTypeKind k1 -> do
-               -- We only solve (a :: *) ~ (b :: *) if Promote a b
-               hasProm <- isJust <$> matchFam ptc_promote [ty1, ty2]
-               -- Note that we don't use the rhs here, since it is already
-               -- taken care of by the Discharge a b instance (and the)
-               -- Coercible constraint as well.
-               if hasProm then might else can't
+          _ | tcIsLiftedTypeKind k1 && f_no_promote -> return False
+          -- We only solve (a :: *) ~ (b :: *) if Promote a b
+          _ | tcIsLiftedTypeKind k1 -> hasInst promote
           -- Otherwise, it's a regular discharge
-          _ | f_no_discharge -> can't
-          _ -> might
-      case canSolve of
-        Nothing -> wontSolve ct
-        Just (_, msg) -> do
-          (msg_check, msg_var) <- checkMsg ptc ct msg
-          let log = Set.singleton (Log msg_var (ctLoc ct))
-          couldSolve (Just (mkProof "grit-discharge" ty1 ty2, ct)) [msg_check] log
+          _ | f_no_discharge -> return False
+          _ -> return True
+      if not canSolve then wontSolve ct
+      else do (msg_check, msg_var) <- checkMsg ptc ct discharge
+              let log = Set.singleton (Log msg_var (ctLoc ct))
+                  proof = mkProof "grit-discharge" ty1 ty2
+              couldSolve (Just (proof, ct)) [msg_check] log
     _ -> wontSolve ct
 
 -- checkMsg generates a `m ~ Msg m0` constraint that we can solve, which unifies
@@ -435,3 +431,8 @@ inspectSol :: Ord d => [Either a (Maybe b, [c], Set d)]
 inspectSol xs = (ls, (catMaybes sols, concat more, Set.unions logs))
   where (ls, rs) = partitionEithers xs
         (sols, more, logs) = unzip3 rs
+
+hasInst :: Type -> TcPluginM Bool
+hasInst ty = case splitTyConApp_maybe ty of
+              Just (tc, args) -> isJust <$> matchFam tc args
+              _ -> return False
