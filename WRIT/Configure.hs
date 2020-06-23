@@ -5,6 +5,7 @@
 {-# LANGUAGE UndecidableInstances #-}
 {-# LANGUAGE NoStarIsType #-}
 {-# LANGUAGE TypeOperators #-}
+{-# LANGUAGE MultiParamTypeClasses #-}
 module WRIT.Configure (
         Default, Promote, Ignore, Discharge,
         Message(..), TypeError(..), ErrorMessage(..),
@@ -20,7 +21,6 @@ data {-kind-} Message
   = Msg ErrorMessage -- ^ Msg holds an ErrorMessage that  will be output as part
                      -- of applying a rule, either as a warning or as a type
                      -- error if the keep-errors flag is set.
-
   | OnlyIf Constraint Message -- ^ OnlyIfs are messages which contain additional
                               -- constraints, and specify to the plugin that an
                               -- additional constraint must be checked when
@@ -32,10 +32,6 @@ data {-kind-} Message
 -- then a ~ Default k will be added to the context of c, and
 -- Γ, a ~ Defaul k |- c : Constraint checked for validity.
 type family Default k :: k
-
--- We define an instance for Type here to trigger overlap errors, since
--- defaulting for Type (i.e. Haskell base types) is generally unsound.
-type instance Default Type = ()
 
 -- | The Ignore family allows us to 'ignore' a given constraint.  Ignore C means
 -- that we can discharge the constraint C whenever it is encountered, however,

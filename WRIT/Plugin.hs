@@ -211,10 +211,10 @@ gritPlugin opts = TcPlugin initialize solve stop
                                       more ++ new_more,
                                       logs `Set.union` new_logs))
            order :: [(SolveFun, String)]
-           order = [ (solveIgnore,    "Ignoring")
-                   , (solveDefault,   "Defaulting")
-                   , (solveOnlyIf,    "OnlyIf")
-                   , (solveDischarge, "Discharging") ]
+           order = [ (solveOnlyIf,    "OnlyIf")
+                   , (solveDischarge, "Discharging")
+                   , (solveIgnore,    "Ignoring")
+                   , (solveDefault,   "Defaulting") ]
            to_check = wanted ++ derived
        (_, (solved_wanteds, more_cts, logs)) <-
           foldM solveWFun (to_check, ([],[],Set.empty)) order
@@ -269,10 +269,9 @@ couldSolve ev work logs = return (Right (ev,work,logs))
 
 
 -- Defaults any ambiguous type variables of kind k to l if Default k = l
--- Ignores any variables of kind (*)
 solveDefault :: SolveFun
 solveDefault ptc@PTC{..} ct =
-  do defaults <- catMaybes <$> mapM getDefault (nonStar $ tyCoVarsOfCtList ct)
+  do defaults <- catMaybes <$> mapM getDefault (tyCoVarsOfCtList ct)
      if null defaults then wontSolve ct
       -- We make assertions that `a ~ def` for all free a in pred_ty of ct. and
       -- add these as new assertions. For meta type variables (i.e. ones that
@@ -290,7 +289,6 @@ solveDefault ptc@PTC{..} ct =
              assert_eqs <- mapM mkAssert eq_tys
              couldSolve Nothing assert_eqs (Set.fromList logs)
    where mkAssert = either (mkDerived bump) (uncurry (mkGiven bump))
-         nonStar = filter (not . tcIsLiftedTypeKind . varType)
          bump = bumpCtLocDepth $ ctLoc ct
          getDefault var = fmap ((var,) . snd) <$> matchFam ptc_default [varType var]
          mkTyEq (var,def) = ( if isMetaTyVar var then Left pred_ty
@@ -298,8 +296,9 @@ solveDefault ptc@PTC{..} ct =
                               LogDefault{log_pred_ty = ctPred ct,
                                          log_var = var, log_kind = varType var,
                                          log_res = def, log_loc =ctLoc ct})
-           where EvExpr proof = mkProof "grit-default" (mkTyVarTy var) def
-                 pred_ty = mkPrimEqPredRole Nominal (mkTyVarTy var) def
+           where EvExpr proof = mkProof "grit-default" (mkTyVarTy var) defApp
+                 pred_ty = mkPrimEqPredRole Nominal (mkTyVarTy var) defApp
+                 defApp = mkTyConApp ptc_default [varType var]
 
 -- Solves Γ |- c :: Constraint if Γ |- Ignore c ~ Msg m, *where c is an empty class*
 solveIgnore :: SolveFun
