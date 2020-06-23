@@ -8,7 +8,7 @@ module WRIT.Plugin ( plugin, module WRIT.Configure ) where
 
 import WRIT.Configure
 
-import Control.Monad (when, guard, foldM, zipWithM, msum)
+import Control.Monad (when, unless, guard, foldM, zipWithM, msum)
 import Data.Maybe (mapMaybe, catMaybes, fromMaybe, fromJust, listToMaybe, isJust)
 import Data.Either
 import Data.IORef
@@ -150,7 +150,7 @@ logToErr LogDefault{..} =
           sppr = txt . showSDoc dflags . ppr
           app ty1 ty2 = mkTyConApp appCon [ty1, ty2]
           msg = foldl1 app $
-                  map sppr $ intersperse (text " ") $
+                  map sppr $ intersperse (text " ")
                     [ text "Defaulting"
                     , quotes (ppr (mkTyVarTy log_var)
                               <+> dcolon <+> ppr log_kind)
@@ -171,22 +171,12 @@ addWarning dflags log = tcPluginIO $ warn (ppr log)
 
 data Flags = Flags { f_debug        :: Bool
                    , f_quiet        :: Bool
-                   , f_keep_errors  :: Bool
-                   , f_no_default   :: Bool
-                   , f_no_ignore    :: Bool
-                   , f_no_promote   :: Bool
-                   , f_no_discharge :: Bool
-                   , f_no_only_if   :: Bool } deriving (Show)
+                   , f_keep_errors  :: Bool } deriving (Show)
 
 getFlags :: [CommandLineOption] -> Flags
 getFlags opts = Flags { f_debug        = "debug"          `elem` opts
                       , f_quiet        = "quiet"          `elem` opts
-                      , f_keep_errors  = "keep-errors"    `elem` opts
-                      , f_no_default   = "no-default"     `elem` opts
-                      , f_no_ignore    = "no-ignore"      `elem` opts
-                      , f_no_discharge = "no-discharge"   `elem` opts
-                      , f_no_promote   = "no-promote"     `elem` opts
-                      , f_no_only_if   = "no-only-if"     `elem` opts }
+                      , f_keep_errors  = "keep-errors"    `elem` opts }
 
 gritPlugin :: [CommandLineOption] -> TcPlugin
 gritPlugin opts = TcPlugin initialize solve stop
@@ -213,7 +203,7 @@ gritPlugin opts = TcPlugin initialize solve stop
                      -> TcPluginM ([Ct], ([(EvTerm, Ct)],[Ct], Set Log))
            solveWFun (unsolved, (solved, more, logs)) (solveFun, explain) = do
              (still_unsolved, (new_solved, new_more, new_logs)) <-
-               inspectSol <$> mapM (solveFun flags pluginTyCons) unsolved
+               inspectSol <$> mapM (solveFun pluginTyCons) unsolved
              mapM_ (pprDebug (explain ++ "-sols")) new_solved
              mapM_ (pprDebug (explain ++ "-more")) new_more
              return (still_unsolved, (solved ++ new_solved,
@@ -234,7 +224,7 @@ gritPlugin opts = TcPlugin initialize solve stop
     stop warns = do dflags <- unsafeTcPluginTcM getDynFlags
                     logs <- Set.toAscList <$> tcPluginIO (readIORef warns)
                     zonked_logs <- mapM zonkLog logs
-                    when (not f_quiet) $ mapM_ (addWarning dflags) zonked_logs
+                    unless f_quiet $ mapM_ (addWarning dflags) zonked_logs
 
 
 data PluginTyCons = PTC { ptc_default :: TyCon
@@ -268,7 +258,7 @@ type Solution = Either Ct (Maybe (EvTerm, Ct), -- The solution to the Ct
                            [Ct],               -- Possible additional work
                            Set Log)              -- What we did
 
-type SolveFun = Flags -> PluginTyCons -> Ct -> TcPluginM Solution
+type SolveFun = PluginTyCons -> Ct -> TcPluginM Solution
 
 wontSolve :: Ct -> TcPluginM Solution
 wontSolve = return . Left
@@ -280,12 +270,9 @@ couldSolve ev work logs = return (Right (ev,work,logs))
 -- Defaults any ambiguous type variables of kind k to l if Default k = l
 -- Ignores any variables of kind (*)
 solveDefault :: SolveFun
-solveDefault Flags{..} _ ct | f_no_default = wontSolve ct
-solveDefault Flags{..} ptc@PTC{..} ct =
+solveDefault ptc@PTC{..} ct =
   do defaults <- catMaybes <$> mapM getDefault (nonStar $ tyCoVarsOfCtList ct)
-     if null defaults
-     then wontSolve ct
-     else
+     if null defaults then wontSolve ct
       -- We make assertions that `a ~ def` for all free a in pred_ty of ct. and
       -- add these as new assertions. For meta type variables (i.e. ones that
       -- have been instantiated with a `forall`, e.g. `forall a. Less H a`), an
@@ -298,20 +285,14 @@ solveDefault Flags{..} ptc@PTC{..} ct =
       -- change the type of `True :: F a Bool` to `True :: a ~ L => F a Bool`.
       -- Note that we cannot simply emit a given for both, since we cannot
       -- mention a meta type variable in a given.
-      do let (eq_tys, logs) = unzip $ map mkTyEq defaults
-         assert_eqs <- mapM mkAssert eq_tys
-         couldSolve Nothing assert_eqs (Set.fromList logs)
-   where mkAssert :: Either PredType (Type, EvExpr) -> TcPluginM Ct
-         mkAssert = either (mkDerived bump) (uncurry (mkGiven bump))
+     else do let (eq_tys, logs) = unzip $ map mkTyEq defaults
+             assert_eqs <- mapM mkAssert eq_tys
+             couldSolve Nothing assert_eqs (Set.fromList logs)
+   where mkAssert = either (mkDerived bump) (uncurry (mkGiven bump))
          nonStar = filter (not . tcIsLiftedTypeKind . varType)
          bump = bumpCtLocDepth $ ctLoc ct
-         getDefault var = do
-           res <- matchFam ptc_default [varType var]
-           case res of
-             Just (_, rhs) -> return $ Just (var, rhs)
-             _ -> return Nothing
-         mkTyEq (var,def) = ( if isMetaTyVar var
-                              then Left pred_ty
+         getDefault var = fmap ((var,) . snd) <$> matchFam ptc_default [varType var]
+         mkTyEq (var,def) = ( if isMetaTyVar var then Left pred_ty
                               else Right (pred_ty, proof),
                               LogDefault{log_pred_ty = ctPred ct,
                                          log_var = var, log_kind = varType var,
@@ -322,9 +303,8 @@ solveDefault Flags{..} ptc@PTC{..} ct =
 -- Solves Γ |- c :: Constraint if Γ |- Ignore c ~ m and  Γ |- m,
 -- *where c is an empty class*
 solveIgnore :: SolveFun
-solveIgnore Flags{..} _ ct | f_no_ignore = wontSolve ct
-solveIgnore _ _ ct@CDictCan{..} | not (null $ classMethods cc_class) = wontSolve ct
-solveIgnore _ ptc@PTC{..} ct@CDictCan{..} = do
+solveIgnore _ ct@CDictCan{..} | not (null $ classMethods cc_class) = wontSolve ct
+solveIgnore ptc@PTC{..} ct@CDictCan{..} = do
   let ignore = mkTyConApp ptc_ignore [ctPred ct]
   hasIgnore <- hasInst ignore
   if not hasIgnore then wontSolve ct
@@ -333,53 +313,34 @@ solveIgnore _ ptc@PTC{..} ct@CDictCan{..} = do
               classCon = tyConSingleDataCon (classTyCon cc_class)
               proof = evDataConApp classCon cc_tyargs []
           couldSolve (Just (proof, ct)) [msg_check] log
-solveIgnore _ _ ct = wontSolve ct
+solveIgnore _ ct = wontSolve ct
 
 
 -- Solves Γ |- (a :: k) ~ (b :: k) if Γ |- Discharge a b ~ m and  Γ |- m.
 -- Promote is the same as Discharge, except we also require that a and b be
 -- Coercible.
 solveDischarge :: SolveFun
-solveDischarge flags@Flags{..} ptc@PTC{..} ct =
+solveDischarge ptc@PTC{..} ct =
   case splitEquality (ctPred ct) of
     Just (k1,ty1,ty2) -> do
       let discharge = mkTyConApp ptc_discharge [k1, ty1, ty2]
           promote = mkTyConApp ptc_promote [ty1, ty2]
+          kIsType = tcIsLiftedTypeKind k1
       hasDischarge <- hasInst discharge
-      canSolve <-
-        case () of
-          _ | not hasDischarge-> return False
-          -- If k is *, then we are doing a promotion, since the only
-          -- instance of Discharge (a :: *) (b ::*) is for Promote.
-          _ | tcIsLiftedTypeKind k1 && f_no_promote -> return False
-          -- We only solve (a :: *) ~ (b :: *) if Promote a b
-          _ | tcIsLiftedTypeKind k1 -> hasInst promote
-          -- Otherwise, it's a regular discharge
-          _ | f_no_discharge -> return False
-          _ -> return True
-      if not canSolve then wontSolve ct
+      -- If k is Type, then we are doing a promotion, and we require a
+      -- promote instance to be defined.
+      missingPromote <- (&&) kIsType . not <$> hasInst promote
+      if not hasDischarge || missingPromote then wontSolve ct
       else do (msg_check, msg_var) <- checkMsg ptc ct discharge
               let log = Set.singleton (Log msg_var (ctLoc ct))
                   proof = mkProof "grit-discharge" ty1 ty2
               couldSolve (Just (proof, ct)) [msg_check] log
     _ -> wontSolve ct
 
--- checkMsg generates a `m ~ Msg m0` constraint that we can solve, which unifies
--- the type variable m0 with whatever the resulting type error message is.
-checkMsg :: PluginTyCons -> Ct -> Type -> TcPluginM (Ct, Type)
-checkMsg PTC{..} ct msg =  do
-  err_msg_kind <- flip mkTyConApp [] <$> getErrMsgCon
-  ty_var <- mkTyVarTy <$> newFlexiTyVar err_msg_kind
-  let eq_ty = mkCoercionType Nominal msg (mkTyConApp ptc_msg [ty_var])
-  ct <- mkWanted (ctLoc ct) eq_ty
-  ty_err <- mkTyErr ty_var
-  return (ct, ty_err)
-
-
 -- Solve only if solves equalities of the for OnlyIf C m_a ~ m_b, by checking
 -- that C holds and that m_a ~ m_b.
 solveOnlyIf :: SolveFun
-solveOnlyIf _ PTC{..} ct =
+solveOnlyIf PTC{..} ct =
   case splitEquality (ctPred ct) of
     Just (k1,ty1,ty2) -> do
         -- As an optimization to avoid the constraint solver having to do too
@@ -395,10 +356,21 @@ solveOnlyIf _ PTC{..} ct =
             couldSolve (Just (ev, ct)) (check_msg:check_cons) Set.empty
           _ -> wontSolve ct
     _ -> wontSolve ct
-  where unwrapOnlyIfs msg = case splitTyConApp_maybe msg of
-                             Just (tc, [con, nested]) | tc == ptc_only_if ->
-                                (con:unwrapOnlyIfs nested)
-                             _ -> [msg]
+  where unwrapOnlyIfs msg =
+         case splitTyConApp_maybe msg of
+           Just (tc, [con, msg]) | tc == ptc_only_if -> con : unwrapOnlyIfs msg
+           _ -> [msg]
+
+-- checkMsg generates a `m ~ Msg m0` constraint that we can solve, which unifies
+-- the type variable m0 with whatever the resulting type error message is.
+checkMsg :: PluginTyCons -> Ct -> Type -> TcPluginM (Ct, Type)
+checkMsg PTC{..} ct msg =  do
+  err_msg_kind <- flip mkTyConApp [] <$> getErrMsgCon
+  ty_var <- mkTyVarTy <$> newFlexiTyVar err_msg_kind
+  let eq_ty = mkCoercionType Nominal msg (mkTyConApp ptc_msg [ty_var])
+  ct <- mkWanted (ctLoc ct) eq_ty
+  ty_err <- mkTyErr ty_var
+  return (ct, ty_err)
 
 mkTyErr ::  Type -> TcPluginM Type
 mkTyErr msg = flip mkTyConApp [typeKind msg, msg] <$>
