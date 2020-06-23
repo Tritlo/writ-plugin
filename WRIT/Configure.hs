@@ -57,4 +57,3 @@ type family Promote (a :: Type) (b :: Type) :: Message
 -- We require that Discharge (a :: *) (b :: *) to be Promote a b for any a,b.
 type instance Discharge (a :: Type) (b :: Type) = OnlyIf (Coercible a b) (Promote a b)
 
-

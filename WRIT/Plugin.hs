@@ -143,22 +143,23 @@ zonkLog log = return log
 logToErr :: Log -> TcPluginM Ct
 logToErr Log{..} = mkWanted log_loc log_pred_ty
 logToErr LogDefault{..} =
-   do txtCon <- promoteDataCon <$> tcLookupDataCon typeErrorTextDataConName
-      appCon <- promoteDataCon <$> tcLookupDataCon typeErrorAppendDataConName
-      dflags <- unsafeTcPluginTcM getDynFlags
-      let txt str = mkTyConApp txtCon [mkStrLitTy $ fsLit str]
-          sppr = txt . showSDoc dflags . ppr
-          app ty1 ty2 = mkTyConApp appCon [ty1, ty2]
-          msg = foldl1 app $
-                  map sppr $ intersperse (text " ")
-                    [ text "Defaulting"
-                    , quotes (ppr (mkTyVarTy log_var)
-                              <+> dcolon <+> ppr log_kind)
-                    , text "to"
-                    , quotes (ppr log_res)
-                    , text "in"
-                    , quotes (ppr log_pred_ty)]
-      mkTyErr msg >>= mkWanted log_loc
+   do sDocToTyErr [ text "Defaulting"
+                  , quotes (ppr (mkTyVarTy log_var)
+                            <+> dcolon <+> ppr log_kind)
+                  , text "to"
+                  , quotes (ppr log_res)
+                  , text "in"
+                  , quotes (ppr log_pred_ty)] >>= mkWanted log_loc
+
+sDocToTyErr :: [SDoc] -> TcPluginM Type
+sDocToTyErr docs =
+  do txtCon <- promoteDataCon <$> tcLookupDataCon typeErrorTextDataConName
+     appCon <- promoteDataCon <$> tcLookupDataCon typeErrorAppendDataConName
+     dflags <- unsafeTcPluginTcM getDynFlags
+     let txt str = mkTyConApp txtCon [mkStrLitTy $ fsLit str]
+         sppr = txt . showSDoc dflags . ppr
+         app ty1 ty2 = mkTyConApp appCon [ty1, ty2]
+     mkTyErr $ foldl1 app $ map sppr $ intersperse (text " ") docs
 
 addWarning :: DynFlags -> Log -> TcPluginM ()
 addWarning dflags log = tcPluginIO $ warn (ppr log)
@@ -300,8 +301,7 @@ solveDefault ptc@PTC{..} ct =
            where EvExpr proof = mkProof "grit-default" (mkTyVarTy var) def
                  pred_ty = mkPrimEqPredRole Nominal (mkTyVarTy var) def
 
--- Solves Γ |- c :: Constraint if Γ |- Ignore c ~ m and  Γ |- m,
--- *where c is an empty class*
+-- Solves Γ |- c :: Constraint if Γ |- Ignore c ~ Msg m, *where c is an empty class*
 solveIgnore :: SolveFun
 solveIgnore _ ct@CDictCan{..} | not (null $ classMethods cc_class) = wontSolve ct
 solveIgnore ptc@PTC{..} ct@CDictCan{..} = do
@@ -316,29 +316,40 @@ solveIgnore ptc@PTC{..} ct@CDictCan{..} = do
 solveIgnore _ ct = wontSolve ct
 
 
--- Solves Γ |- (a :: k) ~ (b :: k) if Γ |- Discharge a b ~ m and  Γ |- m.
--- Promote is the same as Discharge, except we also require that a and b be
--- Coercible.
+-- Solves Γ |- (a :: k) ~ (b :: k) if Γ |- Discharge a b ~ Msg m.
 solveDischarge :: SolveFun
 solveDischarge ptc@PTC{..} ct =
   case splitEquality (ctPred ct) of
     Just (k1,ty1,ty2) -> do
       let discharge = mkTyConApp ptc_discharge [k1, ty1, ty2]
-          promote = mkTyConApp ptc_promote [ty1, ty2]
-          kIsType = tcIsLiftedTypeKind k1
       hasDischarge <- hasInst discharge
-      -- If k is Type, then we are doing a promotion, and we require a
-      -- promote instance to be defined.
-      missingPromote <- (&&) kIsType . not <$> hasInst promote
-      if not hasDischarge || missingPromote then wontSolve ct
+      -- If k is Type, then we are doing a promotion, since the only valid
+      -- instance Discharge (a :: *) (b :: *) comes from WRIT.Configure,
+      -- where we have:
+      --
+      -- ```
+      --    type instance Discharge (a :: *) (b :: *) =
+      --       OnlyIf (Coercible a b) (Promote a b)
+      -- ```
+      --
+      -- But since we don't want to introduce non-determinisim in our rules (or
+      -- a separate rule for promote with some wonky condition on the kind), we
+      -- don't do this check here at the cost of slightly worse error messages.
+      -- let promote = mkTyConApp ptc_promote [ty1, ty2]
+      --     kIsType = tcIsLiftedTypeKind k1
+      -- missingPromote <- (&&) kIsType . not <$> hasInst promote
+      if not hasDischarge  -- || missingPromote
+      then wontSolve ct
       else do (msg_check, msg_var) <- checkMsg ptc ct discharge
               let log = Set.singleton (Log msg_var (ctLoc ct))
                   proof = mkProof "grit-discharge" ty1 ty2
               couldSolve (Just (proof, ct)) [msg_check] log
     _ -> wontSolve ct
 
--- Solve only if solves equalities of the for OnlyIf C m_a ~ m_b, by checking
--- that C holds and that m_a ~ m_b.
+
+
+-- Solve only if solves Γ |- OnlyIf c m_a ~ m_b, by checking  Γ |- c and
+-- Γ |-  m_a ~ m_b
 solveOnlyIf :: SolveFun
 solveOnlyIf PTC{..} ct =
   case splitEquality (ctPred ct) of
