@@ -334,10 +334,10 @@ solveDischarge ptc@PTC{..} ct =
       -- But since we don't want to introduce non-determinisim in our rules (or
       -- a separate rule for promote with some wonky condition on the kind), we
       -- don't do this check here at the cost of slightly worse error messages.
-      -- let promote = mkTyConApp ptc_promote [ty1, ty2]
-      --     kIsType = tcIsLiftedTypeKind k1
-      -- missingPromote <- (&&) kIsType . not <$> hasInst promote
-      if not hasDischarge  -- || missingPromote
+      let promote = mkTyConApp ptc_promote [ty1, ty2]
+          kIsType = tcIsLiftedTypeKind k1
+      missingPromote <- (&&) kIsType . not <$> hasInst promote
+      if not hasDischarge || missingPromote
       then wontSolve ct
       else do (msg_check, msg_var) <- checkMsg ptc ct discharge
               let log = Set.singleton (Log msg_var (ctLoc ct))

@@ -10,6 +10,7 @@
 {-# LANGUAGE PolyKinds #-}
 {-# LANGUAGE UndecidableInstances #-}
 {-# LANGUAGE TypeOperators #-}
+{-# LANGUAGE ScopedTypeVariables #-}
 module Main (main) where
 
 
@@ -52,7 +53,7 @@ type instance Promote a (F H b) =
 type instance Promote a (F L b) =
      (Msg (Text "Automatic promotion of unlabeled '"
            :<>: ShowType a :<>: Text "' to a Public '"
-           :<>: ShowType b :<>: Text "'!"
+           :<>: ShowType a :<>: Text "'!"
            :$$: Text "Perhaps you intended to use 'box'?"))
 
 newtype F (l :: Label) a = MkF {unF :: a} deriving (Show)
@@ -88,6 +89,10 @@ f3 = MkF . unF
 
 f4 :: Less H L => F a b -> F a b
 f4 = MkF . unF
+
+lor :: F L [Bool] -> F L Bool
+lor (x:xs) = if x then True else lor xs
+lor _ = True
 
 main :: IO ()
 main = do print "hello!"
