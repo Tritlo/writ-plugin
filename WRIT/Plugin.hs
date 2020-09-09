@@ -23,6 +23,11 @@ import Data.Set (Set)
 
 import GHC.TypeLits(TypeError(..), ErrorMessage(..))
 
+import Data.IntMap.Strict (IntMap)
+import qualified Data.IntMap.Strict as Map
+
+import System.IO.Unsafe (unsafePerformIO)
+
 #if __GLASGOW_HASKELL__ > 810
 import GHC.Plugins hiding (TcPlugin)
 import GHC.Tc.Plugin
@@ -105,9 +110,31 @@ import Predicate
 plugin :: Plugin
 plugin = defaultPlugin { tcPlugin = Just . gritPlugin
                        , pluginRecompile = purePlugin
-                       , typeCheckResultAction = postProcess }
+                       , installCoreToDos = coreDyn }
 
 --------------------------------------------------------------------------------
+
+-- Ugly Hack to pass information between phases,
+-- because that's not possible currently
+pluginState :: IORef (PluginState)
+{-# NOINLINE  pluginState#-}
+pluginState = unsafePerformIO (newIORef (PS Map.empty 0))
+
+addDynExpr :: EvExpr -> IO Int
+addDynExpr ev = do ps@((PS {..})) <- readIORef pluginState
+                   writeIORef pluginState $
+                      ( PS { next = next + 1
+                           , evMap = Map.insert next ev evMap })
+                   return next
+
+getDynExpr :: Int -> IO (Maybe EvExpr)
+getDynExpr evIntId = do PS{..} <- readIORef pluginState
+                        return $ Map.lookup evIntId evMap
+
+
+data PluginState =
+   PS { evMap :: IntMap EvExpr
+      , next :: Int }
 
 data Log = Log { log_pred_ty :: Type, log_loc :: CtLoc}
          | LogDefault { log_pred_ty :: Type, log_loc :: CtLoc,
@@ -256,16 +283,15 @@ data PluginTyCons = PTC { ptc_default :: TyCon
 data DynCasts = DC { dc_typeable :: Class
                    , dc_dynamic :: TyCon
                    , dc_to_dyn :: Id
-                   , dc_from_dyn :: Id}
+                   , dc_from_dyn :: Id }
 
 getPluginTyCons :: TcPluginM PluginTyCons
 getPluginTyCons =
    do fpmRes <- findImportedModule (mkModuleName "WRIT.Configure") Nothing
-
       dc_dynamic <- getTyCon dYNAMIC "Dynamic"
+      dc_typeable <- getClass tYPEABLE_INTERNAL "Typeable"
       dc_to_dyn <- getId dYNAMIC "toDyn"
       dc_from_dyn <- getId dYNAMIC "fromDyn"
-      dc_typeable <- getClass tYPEABLE_INTERNAL "Typeable"
       let ptc_dc = DC {..}
 
       case fpmRes of
@@ -369,21 +395,29 @@ solveDischarge ptc@PTC{..} ct =
       let promote = mkTyConApp ptc_promote [ty1, ty2]
           kIsType = tcIsLiftedTypeKind k1
           DC {..} = ptc_dc
-          isDyn ty = ty `tcEqType` mkTyConApp dc_dynamic []
+          dynamic = mkTyConApp dc_dynamic []
+          isDyn ty = ty `tcEqType` dynamic
       missingPromote <- (&&) kIsType . not <$> hasInst promote
       if not hasDischarge || missingPromote
       then if isDyn ty1 || isDyn ty2
-           then do let relTy = if isDyn ty1 then ty2 else ty1
+           then do
+                   let relTy = if isDyn ty1 then ty2 else ty1
                        log = Set.singleton (Log relTy (ctLoc ct))
-                       hasTypeable  = mkTyConApp (classTyCon dc_typeable) [k1, relTy]
-                       proof = if isDyn ty1
-                               then mkFromDynCast ptc_dc relTy
-                               else mkToDynCast ptc_dc relTy
-                       ev = ctEvidence ct
-                       env = ctLocEnv $ ctLoc ct
-                       evid = ctEvId ct
-
+                       hasTypeable  = mkTyConApp (classTyCon dc_typeable)
+                                                 [k1, relTy]
+                       -- we emit a proof with a very specific tag,
+                       -- which we then use later.
                    check_typeable <- mkWanted (ctLoc ct) hasTypeable
+                   let dt = ctEvEvId $ ctEvidence check_typeable
+                   let evExpr = if isDyn ty1
+                                then Var dt
+                                else mkApps (Var dc_to_dyn)
+                                     [Type ty1, Var dt]
+                   evIntId <- tcPluginIO $ addDynExpr evExpr
+                   let str = "grit-dynamic-" ++ (show evIntId)
+                       proof = if isDyn ty1
+                               then mkProof str dynamic relTy
+                               else mkProof str relTy dynamic
                    couldSolve (Just (proof, ct)) [check_typeable] log
            else wontSolve ct
       else do (msg_check, msg_var) <- checkMsg ptc ct discharge
@@ -394,17 +428,13 @@ solveDischarge ptc@PTC{..} ct =
 
 mkToDynCast :: DynCasts -> Type -> EvTerm
 mkToDynCast DC{..} ty = evCoercion coercion --mkEvCast exp coercion
-  where coercion = mkUnivCo (PluginProv "grit-dynamic")
-                            Nominal ty dynamic
+  where coercion = mkUnivCo (PluginProv "grit-dynamic") Nominal ty dynamic
         dynamic = mkTyConApp dc_dynamic []
-        exp = evId dc_to_dyn
 
 mkFromDynCast :: DynCasts -> Type -> EvTerm
 mkFromDynCast DC{..} ty = evCoercion coercion
-  where coercion = mkUnivCo (PluginProv "grit-dynamic")
-                            Nominal dynamic ty
+  where coercion = mkUnivCo (PluginProv "grit-dynamic") Nominal dynamic ty
         dynamic = mkTyConApp dc_dynamic []
-        exp = evId dc_from_dyn
 
 -- Solve only if solves Γ |- OnlyIf c m_a ~ m_b, by checking  Γ |- c and
 -- Γ |-  m_a ~ m_b
@@ -479,53 +509,66 @@ hasInst ty = case splitTyConApp_maybe ty of
               Just (tc, args) -> isJust <$> matchFam tc args
               _ -> return False
 
-postProcess _ _ env = do
-   a <- liftIO $ readIORef $ tcg_static_wc env
-   addedDyns <- addDyns (tcg_binds env)
-   return env
+coreDyn :: [CommandLineOption] -> [CoreToDo] -> CoreM [CoreToDo]
+coreDyn _ tds = return $ (CoreDoPluginPass "WRIT" $ bindsOnlyPass addDyn):tds
+  where addDyn :: CoreProgram -> CoreM CoreProgram
+        addDyn program = mapM addDynToBind program
+        addDynToBind :: CoreBind -> CoreM CoreBind
+        addDynToBind (NonRec b expr) = do
+          liftIO $ putStrLn "B" >> (putStrLn $ showSDocUnsafe $ ppr expr)
+          nexpr <- addDynToExpr expr
+          return (NonRec b nexpr)
+        addDynToBind (Rec as) = do
+          let (vs, exprs) = unzip as
+          nexprs  <- mapM addDynToExpr exprs
+          return (Rec $ zip vs nexprs)
+        addDynToExpr :: Expr Var -> CoreM (Expr Var)
+        addDynToExpr (App expr arg) = do
+           nexpr <- addDynToExpr expr
+           narg <- addDynToExpr arg
+           return (App nexpr narg)
+        addDynToExpr (Lam b expr) = do
+           liftIO $ putStrLn $ showSDocUnsafe $ ppr expr
+           Lam b <$> addDynToExpr expr
+        addDynToExpr (Let binds expr) = do
+          do liftIO $ putStrLn $ showSDocUnsafe $ ppr expr
+             nbs <- addDynToBind binds
+             nexpr <- addDynToExpr expr
+             return (Let nbs nexpr)
+        addDynToExpr (Case expr b ty alts) =
+          do liftIO $ putStrLn $ showSDocUnsafe $ ppr expr
+             nexpr <- addDynToExpr expr
+             nalts <- mapM addDynToAlt alts
+             return (Case nexpr b ty nalts)
+        addDynToExpr (Cast expr coercion) = do
+          liftIO $ putStrLn $ showSDocUnsafe $ ppr expr
+          liftIO $ putStrLn $ showSDocUnsafe $ ppr coercion
+          nexpr <- addDynToExpr expr
+          case coercion of
+            UnivCo (PluginProv prov) r t1 t2 ->
+              case gritDynId prov of
+                Nothing -> return (Cast nexpr coercion)
+                Just intId ->
+                  do liftIO $ putStrLn "FOUND"
+                     expr <- liftIO $ getDynExpr intId
+                     liftIO $ putStrLn $ showSDocUnsafe $ ppr expr
+                     case expr of
+                        Just e ->
+                          do let res = App e nexpr
+                             liftIO $ putStrLn $ showSDocUnsafe $ ppr res
+                             return res
+                        _ -> return (Cast nexpr coercion)
+            _ -> return (Cast nexpr coercion)
+        addDynToExpr (Tick t expr) = Tick t <$> addDynToExpr expr
+        addDynToExpr expr = return expr
+        addDynToAlt (c, bs, expr) =
+            do liftIO $ putStrLn $ showSDocUnsafe $ ppr expr
+               nexpr <- addDynToExpr expr
+               return (c, bs, nexpr)
 
-addDyns :: LHsBinds GhcTc -> TcM (LHsBinds GhcTc)
-addDyns = mapBagM addDynToBind
-  where addDynToBind (L loc bind) = do
-          liftIO $ putStrLn $ ((show $ toConstr bind) ++ ": "
-                              ++ (showSDocUnsafe $ ppr bind))
-          nb <- case bind of
-                  AbsBinds {..} ->
-                    do liftIO $ putStrLn $ (showSDocUnsafe $ ppr abs_ev_vars)
-                       liftIO $ putStrLn $ (showSDocUnsafe $ ppr abs_tvs)
-                       liftIO $ putStrLn $ (showSDocUnsafe $ ppr abs_ev_binds)
-                       nds <- addDyns abs_binds
-                       return (bind {abs_binds = nds})
-                  FunBind {..} -> do
-                    nfms <- addDynsToFun fun_matches
-                    return (bind {fun_matches = nfms})
-                  _ -> return bind
-          return (L loc bind)
-
-addDynsToFun :: MatchGroup GhcTc (LHsExpr GhcTc) -> TcM (MatchGroup GhcTc (LHsExpr GhcTc))
-addDynsToFun (MG e (L l as) o) = do
-    nas <- mapM addDynsToAlt as
-    return (MG e (L l nas) o)
-  where addDynsToAlt :: LMatch GhcTc (LHsExpr GhcTc) -> TcM (LMatch GhcTc (LHsExpr GhcTc))
-        addDynsToAlt (L l (m@Match{..})) =  do
-          nghrss <- addDynToGRHSs m_grhss
-          return (L l (m {m_grhss = nghrss}))
-        addDynToGRHSs :: GRHSs GhcTc (LHsExpr GhcTc) -> TcM (GRHSs GhcTc (LHsExpr GhcTc) )
-        addDynToGRHSs (GRHSs e rhss (L l localbs)) = do
-            nrhss <- mapM addDynToLGRHS rhss
-            nlbs <- addDynToLBs localbs
-            return (GRHSs e nrhss (L l nlbs))
-        addDynToGRHSs x = return x
-        addDynToLBs (HsValBinds x (ValBinds xvb bs sigs)) =
-            do nbs <- addDyns bs
-               return (HsValBinds x (ValBinds xvb nbs sigs))
-        addDynToLBs x = return  x
-        addDynToLGRHS (L l (GRHS x sts expr)) = do
-            nexpr <- addDynToLHsExpr expr
-            liftIO $ putStrLn $ showSDocUnsafe $ ppr sts
-            return (L l (GRHS x sts nexpr))
-        addDynToLGRHS x = return x
-        addDynToLHsExpr (L l expr) = do
-            nexpr <- addDynToExpr expr
-            return (L l nexpr)
-        addDynToLHsExpr (HSDo x ct (L l sts))
+gritDynId :: String -> Maybe Int
+gritDynId s = if frst == str
+              then (Just $ read res)
+              else Nothing
+  where str = "grit-dynamic-"
+        (frst, res) = splitAt (length str) s
