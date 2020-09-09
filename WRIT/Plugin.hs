@@ -4,6 +4,7 @@
 {-# LANGUAGE RecordWildCards #-}
 {-# LANGUAGE TupleSections #-}
 {-# LANGUAGE CPP #-}
+{-# LANGUAGE FlexibleContexts #-}
 module WRIT.Plugin ( plugin, module WRIT.Configure ) where
 
 import WRIT.Configure
@@ -12,7 +13,7 @@ import Control.Monad (when, unless, guard, foldM, zipWithM, msum)
 import Data.Maybe (mapMaybe, catMaybes, fromMaybe, fromJust, listToMaybe, isJust)
 import Data.Either
 import Data.IORef
-import Data.List (intersperse)
+import Data.List (intersperse, or)
 import Data.Function (on)
 import Data.Kind (Constraint)
 import Data.Data (Data, toConstr)
@@ -42,6 +43,13 @@ import GHC.Builtin.Types.Prim
 import GHC.Builtin.Names
 
 import GHC.Types.Id.Make
+
+--- PostProcess
+import GHC.Hs.Binds
+import GHC.Hs.Extension
+import GHC.Hs.Expr
+-------
+
 #else
 import GhcPlugins hiding (TcPlugin)
 import TcRnTypes
@@ -65,6 +73,14 @@ import TcType
 import CoAxiom
 import Unify
 
+
+--- PostProcess
+import HsBinds
+import HsExtension
+import HsExpr
+import Bag
+-------
+
 #if __GLASGOW_HASKELL__ < 810
 
 -- Backported from 8.10
@@ -82,13 +98,14 @@ import Predicate
 #endif
 
 
+
 --------------------------------------------------------------------------------
 -- Exported
 
 plugin :: Plugin
 plugin = defaultPlugin { tcPlugin = Just . gritPlugin
-                       , pluginRecompile = purePlugin }
-
+                       , pluginRecompile = purePlugin
+                       , typeCheckResultAction = postProcess }
 
 --------------------------------------------------------------------------------
 
@@ -233,11 +250,24 @@ data PluginTyCons = PTC { ptc_default :: TyCon
                         , ptc_only_if :: TyCon
                         , ptc_ignore  :: TyCon
                         , ptc_discharge  :: TyCon
-                        , ptc_msg :: TyCon }
+                        , ptc_msg :: TyCon
+                        , ptc_dc :: DynCasts }
+
+data DynCasts = DC { dc_typeable :: Class
+                   , dc_dynamic :: TyCon
+                   , dc_to_dyn :: Id
+                   , dc_from_dyn :: Id}
 
 getPluginTyCons :: TcPluginM PluginTyCons
 getPluginTyCons =
    do fpmRes <- findImportedModule (mkModuleName "WRIT.Configure") Nothing
+
+      dc_dynamic <- getTyCon dYNAMIC "Dynamic"
+      dc_to_dyn <- getId dYNAMIC "toDyn"
+      dc_from_dyn <- getId dYNAMIC "fromDyn"
+      dc_typeable <- getClass tYPEABLE_INTERNAL "Typeable"
+      let ptc_dc = DC {..}
+
       case fpmRes of
          Found _ mod  ->
              do ptc_default <- getTyCon mod "Default"
@@ -253,6 +283,8 @@ getPluginTyCons =
   where getTyCon mod name = lookupOrig mod (mkTcOcc name) >>= tcLookupTyCon
         getPromDataCon mod name = promoteDataCon <$>
            (lookupOrig mod (mkDataOcc name) >>= tcLookupDataCon)
+        getClass mod name = lookupOrig mod (mkClsOcc name) >>= tcLookupClass
+        getId mod name = lookupOrig mod (mkVarOcc name) >>= tcLookupId
 
 
 type Solution = Either Ct (Maybe (EvTerm, Ct), -- The solution to the Ct
@@ -336,16 +368,43 @@ solveDischarge ptc@PTC{..} ct =
       -- don't do this check here at the cost of slightly worse error messages.
       let promote = mkTyConApp ptc_promote [ty1, ty2]
           kIsType = tcIsLiftedTypeKind k1
+          DC {..} = ptc_dc
+          isDyn ty = ty `tcEqType` mkTyConApp dc_dynamic []
       missingPromote <- (&&) kIsType . not <$> hasInst promote
       if not hasDischarge || missingPromote
-      then wontSolve ct
+      then if isDyn ty1 || isDyn ty2
+           then do let relTy = if isDyn ty1 then ty2 else ty1
+                       log = Set.singleton (Log relTy (ctLoc ct))
+                       hasTypeable  = mkTyConApp (classTyCon dc_typeable) [k1, relTy]
+                       proof = if isDyn ty1
+                               then mkFromDynCast ptc_dc relTy
+                               else mkToDynCast ptc_dc relTy
+                       ev = ctEvidence ct
+                       env = ctLocEnv $ ctLoc ct
+                       evid = ctEvId ct
+
+                   check_typeable <- mkWanted (ctLoc ct) hasTypeable
+                   couldSolve (Just (proof, ct)) [check_typeable] log
+           else wontSolve ct
       else do (msg_check, msg_var) <- checkMsg ptc ct discharge
               let log = Set.singleton (Log msg_var (ctLoc ct))
                   proof = mkProof "grit-discharge" ty1 ty2
               couldSolve (Just (proof, ct)) [msg_check] log
     _ -> wontSolve ct
 
+mkToDynCast :: DynCasts -> Type -> EvTerm
+mkToDynCast DC{..} ty = evCoercion coercion --mkEvCast exp coercion
+  where coercion = mkUnivCo (PluginProv "grit-dynamic")
+                            Nominal ty dynamic
+        dynamic = mkTyConApp dc_dynamic []
+        exp = evId dc_to_dyn
 
+mkFromDynCast :: DynCasts -> Type -> EvTerm
+mkFromDynCast DC{..} ty = evCoercion coercion
+  where coercion = mkUnivCo (PluginProv "grit-dynamic")
+                            Nominal dynamic ty
+        dynamic = mkTyConApp dc_dynamic []
+        exp = evId dc_from_dyn
 
 -- Solve only if solves Γ |- OnlyIf c m_a ~ m_b, by checking  Γ |- c and
 -- Γ |-  m_a ~ m_b
@@ -401,6 +460,7 @@ mkGiven loc eq_ty ev = flip setCtLoc loc . CNonCanonical <$> newGiven loc eq_ty 
 mkProof :: String -> Type -> Type -> EvTerm
 mkProof str ty1 ty2 = evCoercion $ mkUnivCo (PluginProv str) Nominal ty1 ty2
 
+
 splitEquality :: Type -> Maybe (Kind, Type, Type)
 splitEquality pred =
   do (tyCon, [k1, k2, ty1,ty2]) <- splitTyConApp_maybe pred
@@ -418,3 +478,54 @@ hasInst :: Type -> TcPluginM Bool
 hasInst ty = case splitTyConApp_maybe ty of
               Just (tc, args) -> isJust <$> matchFam tc args
               _ -> return False
+
+postProcess _ _ env = do
+   a <- liftIO $ readIORef $ tcg_static_wc env
+   addedDyns <- addDyns (tcg_binds env)
+   return env
+
+addDyns :: LHsBinds GhcTc -> TcM (LHsBinds GhcTc)
+addDyns = mapBagM addDynToBind
+  where addDynToBind (L loc bind) = do
+          liftIO $ putStrLn $ ((show $ toConstr bind) ++ ": "
+                              ++ (showSDocUnsafe $ ppr bind))
+          nb <- case bind of
+                  AbsBinds {..} ->
+                    do liftIO $ putStrLn $ (showSDocUnsafe $ ppr abs_ev_vars)
+                       liftIO $ putStrLn $ (showSDocUnsafe $ ppr abs_tvs)
+                       liftIO $ putStrLn $ (showSDocUnsafe $ ppr abs_ev_binds)
+                       nds <- addDyns abs_binds
+                       return (bind {abs_binds = nds})
+                  FunBind {..} -> do
+                    nfms <- addDynsToFun fun_matches
+                    return (bind {fun_matches = nfms})
+                  _ -> return bind
+          return (L loc bind)
+
+addDynsToFun :: MatchGroup GhcTc (LHsExpr GhcTc) -> TcM (MatchGroup GhcTc (LHsExpr GhcTc))
+addDynsToFun (MG e (L l as) o) = do
+    nas <- mapM addDynsToAlt as
+    return (MG e (L l nas) o)
+  where addDynsToAlt :: LMatch GhcTc (LHsExpr GhcTc) -> TcM (LMatch GhcTc (LHsExpr GhcTc))
+        addDynsToAlt (L l (m@Match{..})) =  do
+          nghrss <- addDynToGRHSs m_grhss
+          return (L l (m {m_grhss = nghrss}))
+        addDynToGRHSs :: GRHSs GhcTc (LHsExpr GhcTc) -> TcM (GRHSs GhcTc (LHsExpr GhcTc) )
+        addDynToGRHSs (GRHSs e rhss (L l localbs)) = do
+            nrhss <- mapM addDynToLGRHS rhss
+            nlbs <- addDynToLBs localbs
+            return (GRHSs e nrhss (L l nlbs))
+        addDynToGRHSs x = return x
+        addDynToLBs (HsValBinds x (ValBinds xvb bs sigs)) =
+            do nbs <- addDyns bs
+               return (HsValBinds x (ValBinds xvb nbs sigs))
+        addDynToLBs x = return  x
+        addDynToLGRHS (L l (GRHS x sts expr)) = do
+            nexpr <- addDynToLHsExpr expr
+            liftIO $ putStrLn $ showSDocUnsafe $ ppr sts
+            return (L l (GRHS x sts nexpr))
+        addDynToLGRHS x = return x
+        addDynToLHsExpr (L l expr) = do
+            nexpr <- addDynToExpr expr
+            return (L l nexpr)
+        addDynToLHsExpr (HSDo x ct (L l sts))

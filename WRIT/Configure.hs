@@ -6,6 +6,7 @@
 {-# LANGUAGE NoStarIsType #-}
 {-# LANGUAGE TypeOperators #-}
 {-# LANGUAGE MultiParamTypeClasses #-}
+{-# LANGUAGE FunctionalDependencies #-}
 module WRIT.Configure (
         Default, Promote, Ignore, Discharge,
         Message(..), TypeError(..), ErrorMessage(..),
@@ -14,6 +15,7 @@ module WRIT.Configure (
 import GHC.TypeLits (TypeError(..),ErrorMessage(..))
 import Data.Kind (Constraint, Type)
 import Data.Coerce (Coercible)
+import Data.Dynamic
 
 -- We use the Message to reflect that these can also appear
 -- in warnings when using GRIT, and the same with Msg for TypeError.
@@ -25,6 +27,7 @@ data {-kind-} Message
                               -- constraints, and specify to the plugin that an
                               -- additional constraint must be checked when
                               -- applying a given rule.
+  | Use Type Message
 
 -- | The Default family allows us to 'default' free type variables of a given
 -- kind in a constraint to the given value, i.e. if there is an instance
@@ -52,4 +55,3 @@ type family Promote (a :: Type) (b :: Type) :: Message
 
 -- We require that Discharge (a :: *) (b :: *) to be Promote a b for any a,b.
 type instance Discharge (a :: Type) (b :: Type) = OnlyIf (Coercible a b) (Promote a b)
-
