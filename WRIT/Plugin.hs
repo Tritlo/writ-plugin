@@ -123,19 +123,19 @@ pluginState = unsafePerformIO (newIORef (PS Map.empty 0))
 
 addDynExpr :: String -> EvExpr -> IO String
 addDynExpr base ev = do ps@((PS {..})) <- readIORef pluginState
-                        let marker = base ++ "-" ++ show next
+                        let marker = mkFastString (base ++ "-" ++ show next)
                         writeIORef pluginState $
                            ( PS { next = next + 1
                                 , evMap = Map.insert marker ev evMap })
-                        return marker
+                        return $ unpackFS marker
 
 getDynExpr :: String -> IO (Maybe EvExpr)
 getDynExpr marker =  do PS{..} <- readIORef pluginState
-                        return $ Map.lookup marker evMap
+                        return $ Map.lookup (mkFastString marker) evMap
 
 
 data PluginState =
-   PS { evMap :: Map String EvExpr
+   PS { evMap :: Map FastString EvExpr
       , next :: Int }
 
 data Log = Log { log_pred_ty :: Type, log_loc :: CtLoc}
@@ -493,7 +493,7 @@ mkWanted loc eq_ty = flip setCtLoc loc . CNonCanonical <$> newWanted loc eq_ty
 
 exportWanted :: Ct -> Ct
 exportWanted (CNonCanonical (w@CtWanted {ctev_dest = EvVarDest var}))
- = CNonCanonical (w{ctev_dest = EvVarDest (globaliseId var)})
+ = CNonCanonical (w{ctev_dest = EvVarDest (setIdExported var)})
 
 mkGiven :: CtLoc -> PredType -> EvExpr -> TcPluginM Ct
 mkGiven loc eq_ty ev = flip setCtLoc loc . CNonCanonical <$> newGiven loc eq_ty ev
@@ -525,12 +525,14 @@ coreDyn clo tds = return $ (CoreDoPluginPass "WRIT" $ bindsOnlyPass addDyn):tds
   where Flags {..} = getFlags clo
         addDyn :: CoreProgram -> CoreM CoreProgram
         addDyn program = mapM addDynToBind program
+
         addDynToBind :: CoreBind -> CoreM CoreBind
         addDynToBind (NonRec b expr) = NonRec b <$> addDynToExpr expr
         addDynToBind (Rec as) = do
           let (vs, exprs) = unzip as
           nexprs  <- mapM addDynToExpr exprs
           return (Rec $ zip vs nexprs)
+
         addDynToExpr :: Expr Var -> CoreM (Expr Var)
         addDynToExpr (App expr arg) = do
            nexpr <- addDynToExpr expr
@@ -546,6 +548,7 @@ coreDyn clo tds = return $ (CoreDoPluginPass "WRIT" $ bindsOnlyPass addDyn):tds
           do nexpr <- addDynToExpr expr
              nalts <- mapM addDynToAlt alts
              return (Case nexpr b ty nalts)
+        addDynToExpr (Tick t expr) = Tick t <$> addDynToExpr expr
         addDynToExpr orig@(Cast expr coercion) = do
           nexpr <- addDynToExpr expr
           case coercion of
@@ -560,8 +563,9 @@ coreDyn clo tds = return $ (CoreDoPluginPass "WRIT" $ bindsOnlyPass addDyn):tds
                      return res
                 Nothing -> return (Cast nexpr coercion)
             _ -> return (Cast nexpr coercion)
-        addDynToExpr (Tick t expr) = Tick t <$> addDynToExpr expr
-        addDynToExpr expr = return expr
+        addDynToExpr no_sub_expr = return no_sub_expr
+        addDynToAlt :: (AltCon, [Var], Expr Var) ->
+                       CoreM (AltCon, [Var], Expr Var)
         addDynToAlt (c, bs, expr) =
             do nexpr <- addDynToExpr expr
                return (c, bs, nexpr)
