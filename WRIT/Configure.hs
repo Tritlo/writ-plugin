@@ -7,15 +7,23 @@
 {-# LANGUAGE TypeOperators #-}
 {-# LANGUAGE MultiParamTypeClasses #-}
 {-# LANGUAGE FunctionalDependencies #-}
+{-# LANGUAGE ScopedTypeVariables #-}
 module WRIT.Configure (
         Default, Promote, Ignore, Discharge,
         Message(..), TypeError(..), ErrorMessage(..),
+        -- Dynamic extension
+        castDyn
 ) where
 
 import GHC.TypeLits (TypeError(..),ErrorMessage(..))
 import Data.Kind (Constraint, Type)
 import Data.Coerce (Coercible)
+
+-- fromDynErr
+import Data.Typeable
+import Type.Reflection
 import Data.Dynamic
+import GHC.Stack
 
 -- We use the Message to reflect that these can also appear
 -- in warnings when using GRIT, and the same with Msg for TypeError.
@@ -55,3 +63,14 @@ type family Promote (a :: Type) (b :: Type) :: Message
 
 -- We require that Discharge (a :: *) (b :: *) to be Promote a b for any a,b.
 type instance Discharge (a :: Type) (b :: Type) = OnlyIf (Coercible a b) (Promote a b)
+
+
+-- | castDyn casts a Dynamic to any typeable value, and fails with a descriptive
+-- error if the types dont match. Automatically inserted for casting Dynamic
+-- values back to static values.
+castDyn :: forall a . (Typeable a, HasCallStack) => Dynamic -> a
+castDyn arg = fromDyn arg err
+  where err = error ("Couldn't match expected type '" ++ target
+                     ++ "' with actual dynamic type '" ++ actual  ++ "'")
+        target = show (someTypeRep (Proxy :: Proxy a))
+        actual = show (dynTypeRep arg)

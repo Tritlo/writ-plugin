@@ -1,23 +1,25 @@
 {-# OPTIONS_GHC -fplugin=WRIT.Plugin
-                -fplugin-opt=WRIT.Plugin:debug
-                -ddump-ds
+                -fplugin-opt=WRIT.Plugin:marshal-dynamics
+                -dcore-lint
                  #-}
-
+{-# LANGUAGE ScopedTypeVariables #-}
 module Main where
 
 import WRIT.Configure
 import Data.Dynamic
+import Data.Maybe (mapMaybe)
 
 k :: Dynamic -> Int
 k d = fromDyn d 0
 
-xs :: [Dynamic]
-xs = ['b', (), False]
+getValsOfTy :: Typeable a => [Dynamic] -> [a]
+getValsOfTy = mapMaybe fromDynamic
 
+xs :: [Dynamic]
+xs = ["thanks", (), "i", False,
+      "hate", (42 :: Int), "it"]
 
 main :: IO ()
-main = do print "hello, world"
-          --print $ toDyn (2 :: Int)
-        --   print $ fromDyn (2 :: Int) (undefined :: Int)
-          print xs
-        --   print $ k (6 :: Int)
+main = do print xs
+          print $ (castDyn (1 :: Int) :: Integer)
+          print $ (1 :: Int) + (toDyn (1 :: Integer))

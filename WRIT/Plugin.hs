@@ -6,6 +6,7 @@
 {-# LANGUAGE TupleSections #-}
 {-# LANGUAGE CPP #-}
 {-# LANGUAGE FlexibleContexts #-}
+{-# LANGUAGE ScopedTypeVariables #-}
 module WRIT.Plugin ( plugin, module WRIT.Configure ) where
 
 import WRIT.Configure
@@ -21,6 +22,9 @@ import Data.Data (Data, toConstr)
 import Prelude hiding ((<>))
 import qualified Data.Set as Set
 import Data.Set (Set)
+import Data.Proxy
+import Data.Dynamic
+import Type.Reflection (someTypeRep)
 
 import GHC.TypeLits(TypeError(..), ErrorMessage(..))
 
@@ -85,6 +89,7 @@ import HsBinds
 import HsExtension
 import HsExpr
 import Bag
+import TcEvTerm (evCallStack, evDelayedError)
 -------
 
 #if __GLASGOW_HASKELL__ < 810
@@ -115,32 +120,10 @@ plugin = defaultPlugin { tcPlugin = Just . gritPlugin
 
 --------------------------------------------------------------------------------
 
--- Ugly Hack to pass information between phases,
--- because that's not possible currently
-pluginState :: IORef (PluginState)
-{-# NOINLINE  pluginState#-}
-pluginState = unsafePerformIO (newIORef (PS Map.empty 0))
-
-addDynExpr :: String -> EvExpr -> IO String
-addDynExpr base ev = do ps@((PS {..})) <- readIORef pluginState
-                        let marker = mkFastString (base ++ "-" ++ show next)
-                        writeIORef pluginState $
-                           ( PS { next = next + 1
-                                , evMap = Map.insert marker ev evMap })
-                        return $ unpackFS marker
-
-getDynExpr :: String -> IO (Maybe EvExpr)
-getDynExpr marker =  do PS{..} <- readIORef pluginState
-                        return $ Map.lookup (mkFastString marker) evMap
-
-
-data PluginState =
-   PS { evMap :: Map FastString EvExpr
-      , next :: Int }
-
 data Log = Log { log_pred_ty :: Type, log_loc :: CtLoc}
          | LogDefault { log_pred_ty :: Type, log_loc :: CtLoc,
                         log_var :: Var, log_kind :: Kind, log_res :: Type }
+         | LogMarshal { log_pred_ty :: Type, log_loc :: CtLoc, log_to_dyn :: Bool}
 
 logSrc :: Log -> RealSrcSpan
 logSrc = ctLocSpan . log_loc
@@ -148,19 +131,23 @@ logSrc = ctLocSpan . log_loc
 instance Ord Log where
   compare a b = if logSrc a == logSrc b
                 then case (a,b) of
-                  (Log{}, LogDefault{}) -> GT
-                  (LogDefault{}, Log{}) -> LT
+                  (Log{}, _) -> GT
+                  (LogDefault{}, _) -> LT
                   (_, _) -> EQ
                 else compare (logSrc a) (logSrc b)
 
 instance Eq Log where
-   Log{} == LogDefault{} = False
-   LogDefault{} == Log{} = False
    a@Log{} == b@Log{} =
        ((==) `on` logSrc) a b && (eqType `on` log_pred_ty) a b
    a@LogDefault{} == b@LogDefault{} =
        ((==) `on` logSrc) a b && (eqType `on` log_pred_ty) a b
                               && ((==) `on` log_var) a b
+   a@LogMarshal{} == b@LogMarshal{} =
+       ((==) `on` logSrc) a b && (eqType `on` log_pred_ty) a b
+
+   Log{} == _ = False
+   LogDefault{} == _ = False
+   LogMarshal{} == _ = False
 
 instance Outputable Log where
    -- We do some extra work to pretty print the Defaulting messages
@@ -178,6 +165,11 @@ instance Outputable Log where
                              , quotes (ppr log_pred_ty)]
       where printFlav Given = "Will default"
             printFlav _ = "Defaulting"
+   ppr LogMarshal{..} = fsep [ text "Marshalling"
+                             , quotes (ppr log_pred_ty)
+                             , text (if log_to_dyn
+                                     then "to Dynamic"
+                                     else "from Dynamic") ]
 
 zonkLog :: Log -> TcPluginM Log
 zonkLog log@Log{..} = do zonked <- zonkTcType log_pred_ty
@@ -196,6 +188,12 @@ logToErr LogDefault{..} =
                   , quotes (ppr log_res)
                   , text "in"
                   , quotes (ppr log_pred_ty)] >>= mkWanted log_loc
+logToErr LogMarshal{..} =
+   do sDocToTyErr [ text "Marshalling"
+                  , quotes (ppr (log_pred_ty))
+                  , text (if log_to_dyn
+                          then "to Dynamic"
+                          else "from Dynamic") ] >>= mkWanted log_loc
 
 sDocToTyErr :: [SDoc] -> TcPluginM Type
 sDocToTyErr docs =
@@ -216,14 +214,16 @@ addWarning dflags log = tcPluginIO $ warn (ppr log)
                  (RealSrcSpan (logSrc log)) (defaultErrStyle dflags)
 #endif
 
-data Flags = Flags { f_debug        :: Bool
-                   , f_quiet        :: Bool
-                   , f_keep_errors  :: Bool } deriving (Show)
+data Flags = Flags { f_debug            :: Bool
+                   , f_quiet            :: Bool
+                   , f_keep_errors      :: Bool
+                   , f_marshal_dynamics :: Bool } deriving (Show)
 
 getFlags :: [CommandLineOption] -> Flags
-getFlags opts = Flags { f_debug        = "debug"          `elem` opts
-                      , f_quiet        = "quiet"          `elem` opts
-                      , f_keep_errors  = "keep-errors"    `elem` opts }
+getFlags opts = Flags { f_debug                 = "debug"            `elem` opts
+                      , f_quiet                 = "quiet"            `elem` opts
+                      , f_keep_errors           = "keep-errors"      `elem` opts
+                      , f_marshal_dynamics      = "marshal-dynamics" `elem` opts }
 
 gritPlugin :: [CommandLineOption] -> TcPlugin
 gritPlugin opts = TcPlugin initialize solve stop
@@ -258,7 +258,7 @@ gritPlugin opts = TcPlugin initialize solve stop
                                       logs `Set.union` new_logs))
            order :: [(SolveFun, String)]
            order = [ (solveOnlyIf,    "OnlyIf")
-                   , (solveDischarge, "Discharging")
+                   , (solveDischarge flags, "Discharging")
                    , (solveIgnore,    "Ignoring")
                    , (solveDefault,   "Defaulting") ]
            to_check = wanted ++ derived
@@ -285,8 +285,8 @@ data PluginTyCons = PTC { ptc_default :: TyCon
 data DynCasts = DC { dc_typeable :: Class
                    , dc_dynamic :: TyCon
                    , dc_to_dyn :: Id
-                   , dc_from_dyn :: Id
-                   , dc_err :: Id }
+                   , dc_cast_dyn :: Id
+                   , dc_has_call_stack :: TyCon }
 
 getPluginTyCons :: TcPluginM PluginTyCons
 getPluginTyCons =
@@ -294,9 +294,7 @@ getPluginTyCons =
       dc_dynamic <- getTyCon dYNAMIC "Dynamic"
       dc_typeable <- getClass tYPEABLE_INTERNAL "Typeable"
       dc_to_dyn <- getId dYNAMIC "toDyn"
-      dc_from_dyn <- getId dYNAMIC "fromDyn"
-      dc_err <- getId gHC_ERR "error"
-      let ptc_dc = DC {..}
+      dc_has_call_stack <- getTyCon gHC_STACK_TYPES "HasCallStack"
 
       case fpmRes of
          Found _ mod  ->
@@ -306,6 +304,8 @@ getPluginTyCons =
                 ptc_ignore  <- getTyCon mod "Ignore"
                 ptc_msg     <- getPromDataCon mod "Msg"
                 ptc_only_if <- getPromDataCon mod "OnlyIf"
+                dc_cast_dyn <- getId mod "castDyn"
+                let ptc_dc = DC {..}
                 return PTC{..}
          NoPackage uid -> pprPanic "Plugin module not found (no package)!" (ppr uid)
          FoundMultiple ms -> pprPanic "Multiple plugin modules found!" (ppr ms)
@@ -377,9 +377,10 @@ solveIgnore ptc@PTC{..} ct@CDictCan{..} = do
 solveIgnore _ ct = wontSolve ct
 
 
--- Solves Γ |- (a :: k) ~ (b :: k) if Γ |- Discharge a b ~ Msg m.
-solveDischarge :: SolveFun
-solveDischarge ptc@PTC{..} ct =
+-- | Solves Γ |- (a :: k) ~ (b :: k) if Γ |- Discharge a b ~ Msg m.
+-- Requires flags for marshal-dynamics
+solveDischarge :: Flags -> SolveFun
+solveDischarge Flags{..} ptc@PTC{..} ct =
   case splitEquality (ctPred ct) of
     Just (k1,ty1,ty2) -> do
       let discharge = mkTyConApp ptc_discharge [k1, ty1, ty2]
@@ -403,45 +404,14 @@ solveDischarge ptc@PTC{..} ct =
           isDyn ty = ty `tcEqType` dynamic
       missingPromote <- (&&) kIsType . not <$> hasInst promote
       if not hasDischarge || missingPromote
-      then if isDyn ty1 || isDyn ty2
-           then do
-                   let relTy = if isDyn ty1 then ty2 else ty1
-                       log = Set.singleton (Log relTy (ctLoc ct))
-                       hasTypeable  = mkTyConApp (classTyCon dc_typeable)
-                                                 [k1, relTy]
-                   -- we emit a proof with a very specific tag,
-                   -- which we then use later.
-                   -- However, since we don't refer to this until later
-                   -- we need to make sure that the EvVar is marked as exported.
-                   check_typeable <- exportWanted <$>
-                                     mkWanted (ctLoc ct) hasTypeable
-                   let dt = ctEvEvId $ ctEvidence check_typeable
-                   let evExpr = if isDyn ty1
-                                then mkApps (Var dc_from_dyn)
-                                     [ Type ty1, Var dt]
-                                else mkApps (Var dc_to_dyn)
-                                     [Type ty1, Var dt]
-                   marker <- tcPluginIO $ addDynExpr "grit-dynamic" evExpr
-                   let proof = if isDyn ty1
-                               then mkProof marker dynamic relTy
-                               else mkProof marker relTy dynamic
-                   couldSolve (Just (proof, ct)) [check_typeable] log
+      then if f_marshal_dynamics && kIsType && (isDyn ty1 || isDyn ty2)
+           then marshalDynamic k1 ty1 ty2 ptc ct
            else wontSolve ct
       else do (msg_check, msg_var) <- checkMsg ptc ct discharge
               let log = Set.singleton (Log msg_var (ctLoc ct))
                   proof = mkProof "grit-discharge" ty1 ty2
               couldSolve (Just (proof, ct)) [msg_check] log
     _ -> wontSolve ct
-
-mkToDynCast :: DynCasts -> Type -> EvTerm
-mkToDynCast DC{..} ty = evCoercion coercion --mkEvCast exp coercion
-  where coercion = mkUnivCo (PluginProv "grit-dynamic") Nominal ty dynamic
-        dynamic = mkTyConApp dc_dynamic []
-
-mkFromDynCast :: DynCasts -> Type -> EvTerm
-mkFromDynCast DC{..} ty = evCoercion coercion
-  where coercion = mkUnivCo (PluginProv "grit-dynamic") Nominal dynamic ty
-        dynamic = mkTyConApp dc_dynamic []
 
 -- Solve only if solves Γ |- OnlyIf c m_a ~ m_b, by checking  Γ |- c and
 -- Γ |-  m_a ~ m_b
@@ -501,7 +471,6 @@ mkGiven loc eq_ty ev = flip setCtLoc loc . CNonCanonical <$> newGiven loc eq_ty 
 mkProof :: String -> Type -> Type -> EvTerm
 mkProof str ty1 ty2 = evCoercion $ mkUnivCo (PluginProv str) Nominal ty1 ty2
 
-
 splitEquality :: Type -> Maybe (Kind, Type, Type)
 splitEquality pred =
   do (tyCon, [k1, k2, ty1,ty2]) <- splitTyConApp_maybe pred
@@ -520,6 +489,67 @@ hasInst ty = case splitTyConApp_maybe ty of
               Just (tc, args) -> isJust <$> matchFam tc args
               _ -> return False
 
+-- Dynamic extension:
+
+data PluginState = PS { evMap :: Map FastString EvExpr , next :: Int }
+
+-- Global IORef Hack used to pass information between phases, as recommended at HIW.
+pluginState :: IORef (PluginState)
+{-# NOINLINE  pluginState#-}
+pluginState = unsafePerformIO (newIORef (PS Map.empty 0))
+
+addDynExpr :: String -> EvExpr -> IO String
+addDynExpr base ev = do ps@((PS {..})) <- readIORef pluginState
+                        let marker = mkFastString (base ++ "-" ++ show next)
+                        writeIORef pluginState $
+                           ( PS { next = next + 1
+                                , evMap = Map.insert marker ev evMap })
+                        return $ unpackFS marker
+
+getDynExpr :: String -> IO (Maybe  EvExpr)
+getDynExpr marker =  do PS{..} <- readIORef pluginState
+                        return $ Map.lookup (mkFastString marker) evMap
+
+marshalDynamic :: Kind -> Type -> Type -> SolveFun
+marshalDynamic k1 ty1 ty2 PTC{..} ct =
+   do let DC {..} = ptc_dc
+          dynamic = mkTyConApp dc_dynamic []
+          isDyn ty = ty `tcEqType` dynamic
+          relTy = if isDyn ty1 then ty2 else ty1
+          log = Set.singleton (LogMarshal relTy (ctLoc ct) (isDyn ty2))
+          hasTypeable = mkTyConApp (classTyCon dc_typeable) [k1, relTy]
+          hasCallStack = mkTyConApp dc_has_call_stack []
+      -- we emit a proof with a very specific tag,
+      -- which we then use later.
+      -- However, since we don't refer to this until later
+      -- we need to make sure that the EvVar is marked as exported.
+      check_typeable <- exportWanted <$> mkWanted (ctLoc ct) hasTypeable
+      check_call_stack <- exportWanted <$> mkWanted (ctLoc ct) hasCallStack
+      -- We want the runtime errors to point to where the coerceDyn
+      -- is happening .
+      callStack <- mkFromDynErrCallStack dc_cast_dyn ct $
+              ctEvEvId $ ctEvidence check_call_stack
+      let typeableDict = ctEvEvId $ ctEvidence check_typeable
+          evExpr = if isDyn ty1
+                   then mkApps (Var dc_cast_dyn) [Type relTy, Var typeableDict
+                                                 , callStack]
+                   else mkApps (Var dc_to_dyn) [Type relTy, Var typeableDict]
+      marker <- tcPluginIO $ addDynExpr "grit-dynamic" evExpr
+      let proof = if isDyn ty1 then mkProof marker dynamic relTy
+                               else mkProof marker relTy dynamic
+      couldSolve (Just (proof, ct)) [ check_typeable , check_call_stack] log
+
+
+mkFromDynErrCallStack :: Id -> Ct -> EvVar -> TcPluginM EvExpr
+mkFromDynErrCallStack fdid ct csDict =
+  flip mkCast coercion <$>
+     (unsafeTcPluginTcM $ evCallStack (EvCsPushCall name loc var))
+  where name = idName fdid
+        loc = ctLocSpan (ctLoc ct)
+        var = Var csDict
+        coercion = mkSymCo (unwrapIP (exprType var))
+
+-- Post-processing for f_dynamic
 coreDyn :: [CommandLineOption] -> [CoreToDo] -> CoreM [CoreToDo]
 coreDyn clo tds = return $ (CoreDoPluginPass "WRIT" $ bindsOnlyPass addDyn):tds
   where Flags {..} = getFlags clo
@@ -553,7 +583,7 @@ coreDyn clo tds = return $ (CoreDoPluginPass "WRIT" $ bindsOnlyPass addDyn):tds
           nexpr <- addDynToExpr expr
           case coercion of
             UnivCo (PluginProv prov) r t1 t2 ->
-              liftIO $ getDynExpr prov >>= \case
+              (liftIO $ getDynExpr prov) >>= \case
                 Just expr ->
                   do let res = App expr nexpr
                      when f_debug $
@@ -569,10 +599,3 @@ coreDyn clo tds = return $ (CoreDoPluginPass "WRIT" $ bindsOnlyPass addDyn):tds
         addDynToAlt (c, bs, expr) =
             do nexpr <- addDynToExpr expr
                return (c, bs, nexpr)
-
-gritDynId :: String -> Maybe Int
-gritDynId s = if frst == str
-              then (Just $ read res)
-              else Nothing
-  where str = "grit-dynamic-"
-        (frst, res) = splitAt (length str) s
