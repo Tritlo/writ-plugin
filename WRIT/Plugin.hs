@@ -1,3 +1,4 @@
+{-# LANGUAGE LambdaCase #-}
 -- Copyright (c) 2020 Matthías Páll Gissurarson
 {-# LANGUAGE TypeFamilies #-}
 {-# LANGUAGE DataKinds #-}
@@ -23,8 +24,8 @@ import Data.Set (Set)
 
 import GHC.TypeLits(TypeError(..), ErrorMessage(..))
 
-import Data.IntMap.Strict (IntMap)
-import qualified Data.IntMap.Strict as Map
+import Data.Map.Strict (Map)
+import qualified Data.Map.Strict as Map
 
 import System.IO.Unsafe (unsafePerformIO)
 
@@ -120,20 +121,21 @@ pluginState :: IORef (PluginState)
 {-# NOINLINE  pluginState#-}
 pluginState = unsafePerformIO (newIORef (PS Map.empty 0))
 
-addDynExpr :: EvExpr -> IO Int
-addDynExpr ev = do ps@((PS {..})) <- readIORef pluginState
-                   writeIORef pluginState $
-                      ( PS { next = next + 1
-                           , evMap = Map.insert next ev evMap })
-                   return next
+addDynExpr :: String -> EvExpr -> IO String
+addDynExpr base ev = do ps@((PS {..})) <- readIORef pluginState
+                        let marker = base ++ "-" ++ show next
+                        writeIORef pluginState $
+                           ( PS { next = next + 1
+                                , evMap = Map.insert marker ev evMap })
+                        return marker
 
-getDynExpr :: Int -> IO (Maybe EvExpr)
-getDynExpr evIntId = do PS{..} <- readIORef pluginState
-                        return $ Map.lookup evIntId evMap
+getDynExpr :: String -> IO (Maybe EvExpr)
+getDynExpr marker =  do PS{..} <- readIORef pluginState
+                        return $ Map.lookup marker evMap
 
 
 data PluginState =
-   PS { evMap :: IntMap EvExpr
+   PS { evMap :: Map String EvExpr
       , next :: Int }
 
 data Log = Log { log_pred_ty :: Type, log_loc :: CtLoc}
@@ -283,7 +285,8 @@ data PluginTyCons = PTC { ptc_default :: TyCon
 data DynCasts = DC { dc_typeable :: Class
                    , dc_dynamic :: TyCon
                    , dc_to_dyn :: Id
-                   , dc_from_dyn :: Id }
+                   , dc_from_dyn :: Id
+                   , dc_err :: Id }
 
 getPluginTyCons :: TcPluginM PluginTyCons
 getPluginTyCons =
@@ -292,6 +295,7 @@ getPluginTyCons =
       dc_typeable <- getClass tYPEABLE_INTERNAL "Typeable"
       dc_to_dyn <- getId dYNAMIC "toDyn"
       dc_from_dyn <- getId dYNAMIC "fromDyn"
+      dc_err <- getId gHC_ERR "error"
       let ptc_dc = DC {..}
 
       case fpmRes of
@@ -405,19 +409,22 @@ solveDischarge ptc@PTC{..} ct =
                        log = Set.singleton (Log relTy (ctLoc ct))
                        hasTypeable  = mkTyConApp (classTyCon dc_typeable)
                                                  [k1, relTy]
-                       -- we emit a proof with a very specific tag,
-                       -- which we then use later.
-                   check_typeable <- mkWanted (ctLoc ct) hasTypeable
+                   -- we emit a proof with a very specific tag,
+                   -- which we then use later.
+                   -- However, since we don't refer to this until later
+                   -- we need to make sure that the EvVar is marked as exported.
+                   check_typeable <- exportWanted <$>
+                                     mkWanted (ctLoc ct) hasTypeable
                    let dt = ctEvEvId $ ctEvidence check_typeable
                    let evExpr = if isDyn ty1
-                                then Var dt
+                                then mkApps (Var dc_from_dyn)
+                                     [ Type ty1, Var dt]
                                 else mkApps (Var dc_to_dyn)
                                      [Type ty1, Var dt]
-                   evIntId <- tcPluginIO $ addDynExpr evExpr
-                   let str = "grit-dynamic-" ++ (show evIntId)
-                       proof = if isDyn ty1
-                               then mkProof str dynamic relTy
-                               else mkProof str relTy dynamic
+                   marker <- tcPluginIO $ addDynExpr "grit-dynamic" evExpr
+                   let proof = if isDyn ty1
+                               then mkProof marker dynamic relTy
+                               else mkProof marker relTy dynamic
                    couldSolve (Just (proof, ct)) [check_typeable] log
            else wontSolve ct
       else do (msg_check, msg_var) <- checkMsg ptc ct discharge
@@ -484,6 +491,10 @@ mkDerived loc eq_ty = flip setCtLoc loc . CNonCanonical <$> newDerived loc eq_ty
 mkWanted :: CtLoc -> PredType -> TcPluginM Ct
 mkWanted loc eq_ty = flip setCtLoc loc . CNonCanonical <$> newWanted loc eq_ty
 
+exportWanted :: Ct -> Ct
+exportWanted (CNonCanonical (w@CtWanted {ctev_dest = EvVarDest var}))
+ = CNonCanonical (w{ctev_dest = EvVarDest (globaliseId var)})
+
 mkGiven :: CtLoc -> PredType -> EvExpr -> TcPluginM Ct
 mkGiven loc eq_ty ev = flip setCtLoc loc . CNonCanonical <$> newGiven loc eq_ty ev
 
@@ -510,14 +521,12 @@ hasInst ty = case splitTyConApp_maybe ty of
               _ -> return False
 
 coreDyn :: [CommandLineOption] -> [CoreToDo] -> CoreM [CoreToDo]
-coreDyn _ tds = return $ (CoreDoPluginPass "WRIT" $ bindsOnlyPass addDyn):tds
-  where addDyn :: CoreProgram -> CoreM CoreProgram
+coreDyn clo tds = return $ (CoreDoPluginPass "WRIT" $ bindsOnlyPass addDyn):tds
+  where Flags {..} = getFlags clo
+        addDyn :: CoreProgram -> CoreM CoreProgram
         addDyn program = mapM addDynToBind program
         addDynToBind :: CoreBind -> CoreM CoreBind
-        addDynToBind (NonRec b expr) = do
-          liftIO $ putStrLn "B" >> (putStrLn $ showSDocUnsafe $ ppr expr)
-          nexpr <- addDynToExpr expr
-          return (NonRec b nexpr)
+        addDynToBind (NonRec b expr) = NonRec b <$> addDynToExpr expr
         addDynToBind (Rec as) = do
           let (vs, exprs) = unzip as
           nexprs  <- mapM addDynToExpr exprs
@@ -528,42 +537,33 @@ coreDyn _ tds = return $ (CoreDoPluginPass "WRIT" $ bindsOnlyPass addDyn):tds
            narg <- addDynToExpr arg
            return (App nexpr narg)
         addDynToExpr (Lam b expr) = do
-           liftIO $ putStrLn $ showSDocUnsafe $ ppr expr
            Lam b <$> addDynToExpr expr
         addDynToExpr (Let binds expr) = do
-          do liftIO $ putStrLn $ showSDocUnsafe $ ppr expr
-             nbs <- addDynToBind binds
+          do nbs <- addDynToBind binds
              nexpr <- addDynToExpr expr
              return (Let nbs nexpr)
         addDynToExpr (Case expr b ty alts) =
-          do liftIO $ putStrLn $ showSDocUnsafe $ ppr expr
-             nexpr <- addDynToExpr expr
+          do nexpr <- addDynToExpr expr
              nalts <- mapM addDynToAlt alts
              return (Case nexpr b ty nalts)
-        addDynToExpr (Cast expr coercion) = do
-          liftIO $ putStrLn $ showSDocUnsafe $ ppr expr
-          liftIO $ putStrLn $ showSDocUnsafe $ ppr coercion
+        addDynToExpr orig@(Cast expr coercion) = do
           nexpr <- addDynToExpr expr
           case coercion of
             UnivCo (PluginProv prov) r t1 t2 ->
-              case gritDynId prov of
+              liftIO $ getDynExpr prov >>= \case
+                Just expr ->
+                  do let res = App expr nexpr
+                     when f_debug $
+                       liftIO $ putStrLn $ showSDocUnsafe $
+                       text "Replacing" <+> parens (ppr orig)
+                       <+> text "with" <+> parens (ppr res)
+                     return res
                 Nothing -> return (Cast nexpr coercion)
-                Just intId ->
-                  do liftIO $ putStrLn "FOUND"
-                     expr <- liftIO $ getDynExpr intId
-                     liftIO $ putStrLn $ showSDocUnsafe $ ppr expr
-                     case expr of
-                        Just e ->
-                          do let res = App e nexpr
-                             liftIO $ putStrLn $ showSDocUnsafe $ ppr res
-                             return res
-                        _ -> return (Cast nexpr coercion)
             _ -> return (Cast nexpr coercion)
         addDynToExpr (Tick t expr) = Tick t <$> addDynToExpr expr
         addDynToExpr expr = return expr
         addDynToAlt (c, bs, expr) =
-            do liftIO $ putStrLn $ showSDocUnsafe $ ppr expr
-               nexpr <- addDynToExpr expr
+            do nexpr <- addDynToExpr expr
                return (c, bs, nexpr)
 
 gritDynId :: String -> Maybe Int

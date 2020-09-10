@@ -14,4 +14,4 @@ k d = fromDyn d 0
 main :: IO ()
 main = do print "hello, world"
           print $ toDyn (2 :: Int)
-          print $ fromDyn (2 :: Int) (1 :: Int)
+          print $ fromDyn (2 :: Int) (undefined :: Integer)
