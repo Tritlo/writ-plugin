@@ -19,7 +19,7 @@ import GHC.TypeLits (TypeError(..),ErrorMessage(..))
 import Data.Kind (Constraint, Type)
 import Data.Coerce (Coercible)
 
--- fromDynErr
+-- castDyn
 import Data.Typeable
 import Type.Reflection
 import Data.Dynamic
@@ -35,7 +35,6 @@ data {-kind-} Message
                               -- constraints, and specify to the plugin that an
                               -- additional constraint must be checked when
                               -- applying a given rule.
-  | Use Type Message
 
 -- | The Default family allows us to 'default' free type variables of a given
 -- kind in a constraint to the given value, i.e. if there is an instance

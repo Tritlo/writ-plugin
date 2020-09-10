@@ -1,5 +1,5 @@
-{-# LANGUAGE LambdaCase #-}
 -- Copyright (c) 2020 Matthías Páll Gissurarson
+{-# LANGUAGE LambdaCase #-}
 {-# LANGUAGE TypeFamilies #-}
 {-# LANGUAGE DataKinds #-}
 {-# LANGUAGE RecordWildCards #-}
@@ -33,6 +33,8 @@ import qualified Data.Map.Strict as Map
 
 import System.IO.Unsafe (unsafePerformIO)
 
+import Bag
+
 #if __GLASGOW_HASKELL__ > 810
 import GHC.Plugins hiding (TcPlugin)
 import GHC.Tc.Plugin
@@ -54,11 +56,10 @@ import GHC.Builtin.Names
 
 import GHC.Types.Id.Make
 
---- PostProcess
 import GHC.Hs.Binds
 import GHC.Hs.Extension
 import GHC.Hs.Expr
--------
+import GHC.Types.EvTerm (evCallStack)
 
 #else
 import GhcPlugins hiding (TcPlugin)
@@ -88,8 +89,7 @@ import Unify
 import HsBinds
 import HsExtension
 import HsExpr
-import Bag
-import TcEvTerm (evCallStack, evDelayedError)
+import TcEvTerm (evCallStack)
 -------
 
 #if __GLASGOW_HASKELL__ < 810
@@ -461,10 +461,6 @@ mkDerived loc eq_ty = flip setCtLoc loc . CNonCanonical <$> newDerived loc eq_ty
 mkWanted :: CtLoc -> PredType -> TcPluginM Ct
 mkWanted loc eq_ty = flip setCtLoc loc . CNonCanonical <$> newWanted loc eq_ty
 
-exportWanted :: Ct -> Ct
-exportWanted (CNonCanonical (w@CtWanted {ctev_dest = EvVarDest var}))
- = CNonCanonical (w{ctev_dest = EvVarDest (setIdExported var)})
-
 mkGiven :: CtLoc -> PredType -> EvExpr -> TcPluginM Ct
 mkGiven loc eq_ty ev = flip setCtLoc loc . CNonCanonical <$> newGiven loc eq_ty ev
 
@@ -539,6 +535,9 @@ marshalDynamic k1 ty1 ty2 PTC{..} ct =
                                else mkProof marker relTy dynamic
       couldSolve (Just (proof, ct)) [ check_typeable , check_call_stack] log
 
+exportWanted :: Ct -> Ct
+exportWanted (CNonCanonical (w@CtWanted {ctev_dest = EvVarDest var}))
+ = CNonCanonical (w{ctev_dest = EvVarDest (setIdExported var)})
 
 mkFromDynErrCallStack :: Id -> Ct -> EvVar -> TcPluginM EvExpr
 mkFromDynErrCallStack fdid ct csDict =
