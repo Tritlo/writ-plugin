@@ -1,7 +1,6 @@
 {-# OPTIONS_GHC -fplugin=WRIT.Plugin
                 -fplugin-opt=WRIT.Plugin:debug
                 -dcore-lint
-                -fprint-typechecker-elaboration
                  #-}
 {-# LANGUAGE ScopedTypeVariables #-}
 module Main where

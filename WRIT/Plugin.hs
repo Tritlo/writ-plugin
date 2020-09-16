@@ -86,16 +86,10 @@ import CoAxiom
 import Unify
 
 
---- PostProcess
-import HsBinds
-import HsExtension
-import HsExpr
-import TcEvTerm (evCallStack)
--------
 
 -- Holefits
 import RdrName (globalRdrEnvElts)
-import TcRnMonad (getGlobalRdrEnv, captureConstraints, pushLevelAndCaptureConstraints)
+import TcRnMonad (getGlobalRdrEnv, getGblEnv)
 import TcHoleErrors
 import PrelInfo (knownKeyNames)
 import Data.Graph (graphFromEdges, topSort)
@@ -103,7 +97,23 @@ import Control.Monad (filterM)
 import DsBinds (dsHsWrapper)
 import DsMonad (initDsTc)
 
+import TcEvTerm (evCallStack)
+
+#if __GLASGOW_HASKELL__ >= 810
+import GHC.Hs.Expr
+
+#else
+
+--- Dynamic
+import HsBinds
+import HsExtension
+import HsExpr
+-------
+
+#endif
+
 #if __GLASGOW_HASKELL__ < 810
+
 
 -- Backported from 8.10
 isEqPrimPred = isCoVarType
@@ -127,6 +137,15 @@ import Predicate
 plugin :: Plugin
 plugin = defaultPlugin { tcPlugin = Just . gritPlugin
                        , pluginRecompile = purePlugin
+#if __GLASGOW_HASKELL__ >= 810
+                       , holeFitPlugin = \_ -> Just $
+                           fromPureHFPlugin (HoleFitPlugin {
+                                              candPlugin = \_ c -> return c,
+                                              fitPlugin = \h f ->
+                                                case (tyHCt h) >>= holeCtOcc of
+                                                  Just occ -> byCommons occ f
+                                                  _ -> return f })
+#endif
                        , installCoreToDos = coreDyn }
 
 --------------------------------------------------------------------------------
@@ -610,6 +629,7 @@ coreDyn clo tds = return $ (CoreDoPluginPass "WRIT" $ bindsOnlyPass addDyn):tds
             do nexpr <- addDynToExpr expr
                return (c, bs, nexpr)
 
+
 -- Typed-Holes
 solveHole :: SolveFun
 solveHole ptc@PTC{..} ct@CHoleCan{cc_ev=CtWanted{ctev_dest=EvVarDest evVar},
@@ -617,18 +637,23 @@ solveHole ptc@PTC{..} ct@CHoleCan{cc_ev=CtWanted{ctev_dest=EvVarDest evVar},
   do let ty = ctPred ct
      fits <- do
 #if __GLASGOW_HASKELL__ >= 810
-      hfPlugs <- tcg_hf_plugins <$> getGblEnv
+      hfPlugs <- unsafeTcPluginTcM $ tcg_hf_plugins <$> getGblEnv
       let ty_h = TyH emptyBag [] (Just ct)
           (candidatePlugins, fitPlugins) =
-             unzip $ map (\p-> ((candPlugin p) hole, (fitPlugin p) ct))
+             unzip $ map (\p-> ((candPlugin p) ty_h, (fitPlugin p) ty_h)) hfPlugs
+      unsafeTcPluginTcM $ getCandsInScope ct
+                        >>= flip (foldM (flip ($))) candidatePlugins
+                        >>= fmap snd . tcFilterHoleFits Nothing ty_h (ty, [])
+                        >>= sortByGraph
+                        >>= fmap (filter isCooked) . flip (foldM (flip ($))) fitPlugins
 #else
-      let (candidatePlugins, fitPlugins) = ([],[return . byCommons occ])
-#endif
+      let (candidatePlugins, fitPlugins) = ([],[byCommons occ])
       unsafeTcPluginTcM $ getCandsInScope ct
                         >>= flip (foldM (flip ($))) candidatePlugins
                         >>= fmap snd . tcFilterHoleFits Nothing [] [] (ty, [])
                         >>= sortByGraph
                         >>= fmap (filter isCooked) . flip (foldM (flip ($))) fitPlugins
+#endif
      -- We should pick a good "fit" here, taking the first after sorting by
      -- subsumption is something, but picking a good fit is a whole research
      -- field. We delegate that part to any installed hole fit plugins.
@@ -641,29 +666,36 @@ solveHole ptc@PTC{..} ct@CHoleCan{cc_ev=CtWanted{ctev_dest=EvVarDest evVar},
          couldSolve (Just (EvExpr core , ct)) needed log
        _ -> wontSolve ct
 
-  where -- A simple "hole fit plugin", as an example to use when hole fit
-        -- plugins aren't available.
-        byCommons :: OccName -> [HoleFit] -> [HoleFit]
-        byCommons name fits =
-          case occNameString name of
-            "_" -> fits
-            '_':name -> [fst (maximumBy (compare `on` snd) $
-                           map (id &&& computeCommons name) fits)]
-          where commons :: Eq a => [a] -> [a] -> Int
-                commons s1a@(s1:s1s) s2a@(s2:s2s)
-                  | s1 == s2 = 1 + commons s1s s2s
-                  | otherwise = max (commons s1s s2a) (commons s1a s2s)
-                commons _ _ = 0
-                computeCommons :: String -> HoleFit -> Int
-                computeCommons name = commons (sort name)
-                                    . sort . occNameString . occName . hfId
 solveHole _ ct = wontSolve ct
 
+
+holeCtOcc :: Ct -> Maybe OccName
+holeCtOcc CHoleCan{cc_hole=hole@(ExprHole (TrueExprHole occ))} = Just occ
+holeCtOcc _ = Nothing
+
+-- A simple "hole fit plugin", as an example to use when hole fit
+-- plugins aren't available.
+byCommons :: OccName -> [HoleFit] -> TcM [HoleFit]
+byCommons name fits = return $
+  case occNameString name of
+    "_" -> fits
+    '_':name -> [fst (maximumBy (compare `on` snd) $
+                    map (id &&& computeCommons name) fits)]
+  where commons :: Eq a => [a] -> [a] -> Int
+        commons s1a@(s1:s1s) s2a@(s2:s2s)
+          | s1 == s2 = 1 + commons s1s s2s
+          | otherwise = max (commons s1s s2a) (commons s1a s2s)
+        commons _ _ = 0
+        computeCommons :: String -> HoleFit -> Int
+        computeCommons name = commons (sort name)
+                                . sort . occNameString . occName . hfId
 
 -- We don't want any raw hole fits, since we need the actual ids.
 isCooked :: HoleFit -> Bool
 isCooked HoleFit{..} = True
+#if __GLASGOW_HASKELL__ >= 810
 isCooked _ = False
+#endif
 
 candToCore :: Ct -> HoleFit -> TcM (CoreExpr, [Ct])
 candToCore ct fit@HoleFit{..}  = do
@@ -671,7 +703,12 @@ candToCore ct fit@HoleFit{..}  = do
     -- We know it's going to be true, since it came from tcFilterHoleFits. We
     -- also don't have to worry about unification, since we're explicitly using
     -- THIS fit.
+#if __GLASGOW_HASKELL__ < 810
     ((True, wrp)) <- tcCheckHoleFit emptyBag [] (ctPred ct) hfType
+#else
+    let ty_h = TyH emptyBag [] (Just ct)
+    ((True, wrp)) <- tcCheckHoleFit ty_h (ctPred ct) hfType
+#endif
     term <- ($ Var hfId) <$> (initDsTc $ dsHsWrapper wrp)
     let evVars = nonDetEltsUniqSet $ evVarsOfTerm (EvExpr term)
     return (term, map evToCt evVars)
