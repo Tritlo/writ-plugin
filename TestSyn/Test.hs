@@ -1,13 +1,11 @@
 {-# OPTIONS_GHC -fplugin=WRIT.Plugin
-                -fplugin-opt=WRIT.Plugin:debug
-                -dcore-lint
-                 #-}
+                -frefinement-level-hole-fits=2
+ #-}
 {-# LANGUAGE ScopedTypeVariables #-}
 module Main where
 
 import WRIT.Configure
 import Data.Dynamic
-import Data.Maybe (mapMaybe)
 
 main :: IO ()
-main = do print (_min :: Bool)
+main = do print ((_fmap_succ :: [Int] -> [Int]) [1, 2])

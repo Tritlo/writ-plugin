@@ -80,6 +80,7 @@ import Inst hiding (newWanted)
 
 import MkId
 import TcMType hiding (newWanted, newFlexiTyVar, zonkTcType)
+import qualified TcMType as TcM
 
 import TcType
 import CoAxiom
@@ -89,11 +90,11 @@ import Unify
 
 -- Holefits
 import RdrName (globalRdrEnvElts)
-import TcRnMonad (getGlobalRdrEnv, getGblEnv)
+import TcRnMonad (getGlobalRdrEnv, getGblEnv, newSysName)
 import TcHoleErrors
 import PrelInfo (knownKeyNames)
 import Data.Graph (graphFromEdges, topSort)
-import Control.Monad (filterM)
+import Control.Monad (filterM, replicateM)
 import DsBinds (dsHsWrapper)
 import DsMonad (initDsTc)
 
@@ -155,26 +156,49 @@ data Log = Log { log_pred_ty :: Type, log_loc :: CtLoc}
                         log_var :: Var, log_kind :: Kind, log_res :: Type }
          | LogMarshal { log_pred_ty :: Type, log_loc :: CtLoc, log_to_dyn :: Bool}
          | LogSDoc {log_pred_ty :: Type, log_loc :: CtLoc, log_msg :: SDoc}
+
 logSrc :: Log -> RealSrcSpan
 logSrc = ctLocSpan . log_loc
 
 instance Ord Log where
-  compare = compare `on` logSrc
+  compare a@Log{} b@Log{} =
+      if logSrc a == logSrc b
+      then (compare `on` (showSDocUnsafe . ppr)) a b
+      else (compare `on` logSrc) a b
+  compare Log{} _ = LT
+  compare _ Log{} = GT
+  compare a@LogDefault{} b@LogDefault{} =
+      if logSrc a == logSrc b
+      then (compare `on` (showSDocUnsafe . ppr)) a b
+      else (compare `on` logSrc) a b
+  compare LogDefault{} _ = LT
+  compare _ LogDefault{} = GT
+  compare a@LogMarshal{} b@LogMarshal{} =
+      if logSrc a == logSrc b
+      then (compare `on` (showSDocUnsafe . ppr)) a b
+      else (compare `on` logSrc) a b
+  compare LogMarshal{} _ = LT
+  compare _ LogMarshal{} = GT
+  compare a@LogSDoc{} b@LogSDoc{} =
+      if logSrc a == logSrc b
+      then (compare `on` (showSDocUnsafe . ppr)) a b
+      else (compare `on` logSrc) a b
 
 instance Eq Log where
    a@Log{} == b@Log{} =
        ((==) `on` logSrc) a b && (eqType `on` log_pred_ty) a b
+   Log{} == _ = False
    a@LogDefault{} == b@LogDefault{} =
        ((==) `on` logSrc) a b && (eqType `on` log_pred_ty) a b
                               && ((==) `on` log_var) a b
+   LogDefault{} == _ = False
    a@LogMarshal{} == b@LogMarshal{} =
        ((==) `on` logSrc) a b && (eqType `on` log_pred_ty) a b
-   a@LogSDoc{} == b@LogSDoc{} =
-       ((==) `on` logSrc) a b && (eqType `on` log_pred_ty) a b
-
-   Log{} == _ = False
-   LogDefault{} == _ = False
    LogMarshal{} == _ = False
+   a@LogSDoc{} == b@LogSDoc{} =
+       ((==) `on` logSrc) a b
+       && (eqType `on` log_pred_ty) a b
+       && ((==) `on` (showSDocUnsafe . log_msg)) a b
    LogSDoc{} == _ = False
 
 instance Outputable Log where
@@ -223,6 +247,7 @@ logToErr LogMarshal{..} =
                   , text (if log_to_dyn
                           then "to Dynamic"
                           else "from Dynamic") ] >>= mkWanted log_loc
+logToErr LogSDoc{..} = sDocToTyErr [log_msg] >>= mkWanted log_loc
 
 sDocToTyErr :: [SDoc] -> TcPluginM Type
 sDocToTyErr docs =
@@ -434,9 +459,9 @@ solveDischarge ptc@PTC{..} ct =
           isDyn ty = ty `tcEqType` dynamic
       missingPromote <- (&&) kIsType . not <$> hasInst promote
       if not hasDischarge || missingPromote
-      then if kIsType && (isDyn ty1 || isDyn ty2)
-           then marshalDynamic k1 ty1 ty2 ptc ct
-           else wontSolve ct
+      then -- if kIsType && (isDyn ty1 || isDyn ty2)
+           -- then marshalDynamic k1 ty1 ty2 ptc ct else
+           wontSolve ct
       else do (msg_check, msg_var) <- checkMsg ptc ct discharge
               let log = Set.singleton (Log msg_var (ctLoc ct))
                   proof = mkProof "grit-discharge" ty1 ty2
@@ -634,40 +659,63 @@ coreDyn clo tds = return $ (CoreDoPluginPass "WRIT" $ bindsOnlyPass addDyn):tds
 solveHole :: SolveFun
 solveHole ptc@PTC{..} ct@CHoleCan{cc_ev=CtWanted{ctev_dest=EvVarDest evVar},
                                   cc_hole=hole@(ExprHole (TrueExprHole occ))} =
-  do let ty = ctPred ct
-     fits <- do
+  do fits <- do
 #if __GLASGOW_HASKELL__ >= 810
       hfPlugs <- unsafeTcPluginTcM $ tcg_hf_plugins <$> getGblEnv
       let ty_h = TyH emptyBag [] (Just ct)
           (candidatePlugins, fitPlugins) =
              unzip $ map (\p-> ((candPlugin p) ty_h, (fitPlugin p) ty_h)) hfPlugs
-      unsafeTcPluginTcM $ getCandsInScope ct
-                        >>= flip (foldM (flip ($))) candidatePlugins
-                        >>= fmap snd . tcFilterHoleFits Nothing ty_h (ty, [])
-                        >>= sortByGraph
-                        >>= fmap (filter isCooked) . flip (foldM (flip ($))) fitPlugins
+          holeFilter = flip (tcFilterHoleFits Nothing ty_h)
 #else
       let (candidatePlugins, fitPlugins) = ([],[byCommons occ])
-      unsafeTcPluginTcM $ getCandsInScope ct
-                        >>= flip (foldM (flip ($))) candidatePlugins
-                        >>= fmap snd . tcFilterHoleFits Nothing [] [] (ty, [])
-                        >>= sortByGraph
-                        >>= fmap (filter isCooked) . flip (foldM (flip ($))) fitPlugins
+          holeFilter = flip (tcFilterHoleFits Nothing [] [])
 #endif
+      unsafeTcPluginTcM $
+        -- We generate refinement-level-hole-fits as well, but we don't want to
+        -- loop indefinitely, so we only go down one level.
+        do ref_lvl <- refLevelHoleFits <$> getDynFlags
+           let ty_lvl = case (split '$' $ occNameString occ) of
+                         _:num:_ -> 0
+                         _ -> case ref_lvl of
+                                Just n -> n
+                                _ -> 0
+           ref_tys <-  mapM (mkRefTy ct) [0..ty_lvl]
+           cands <- getCandsInScope ct >>= flip (foldM (flip ($))) candidatePlugins
+           concat <$> mapM (\t -> fmap snd (holeFilter cands t) >>= sortByGraph) ref_tys
+             >>= fmap (filter isCooked) . flip (foldM (flip ($))) fitPlugins
+
      -- We should pick a good "fit" here, taking the first after sorting by
      -- subsumption is something, but picking a good fit is a whole research
      -- field. We delegate that part to any installed hole fit plugins.
      case fits of
        (fit:_) -> do
-         let log = Set.singleton $ LogSDoc ty (ctLoc ct) $ text "replacing"
-                     <+> quotes (ppr (holeOcc hole) <+> dcolon <+> ppr (ctPred ct))
-                     <+> text "with" <+> quotes (ppr (hfId fit))
          (core, needed) <- unsafeTcPluginTcM $ candToCore ct fit
+         let holeName (CHoleCan _ (ExprHole (TrueExprHole occ))) = Just (ppr occ)
+             holeName _ = Nothing
+             holeNames = mapMaybe holeName needed
+             log = Set.singleton $ LogSDoc hole_ty (ctLoc ct) $ text "replacing"
+                     <+> quotes (ppr (holeOcc hole) <+> dcolon <+> ppr hole_ty)
+                     <+> text "with"
+                     <+> quotes (foldl (<+>) (ppr (hfId fit)) holeNames)
          couldSolve (Just (EvExpr core , ct)) needed log
        _ -> wontSolve ct
-
+  where hole_ty = ctPred ct
 solveHole _ ct = wontSolve ct
 
+
+
+mkRefTy :: Ct -> Int -> TcM (TcType, [TcTyVar])
+mkRefTy ct refLvl = (wrapWithVars &&& id) <$> newTyVars
+  where hole_ty = ctPred ct
+        hole_lvl = ctLocLevel $ ctEvLoc $ ctEvidence ct
+        newTyVars = replicateM refLvl $ setLvl <$>
+                        (newOpenTypeKind >>= TcM.newFlexiTyVar)
+        setLvl = flip setMetaTyVarTcLevel hole_lvl
+#if __GLASGOW_HASKELL__ >= 810
+        wrapWithVars vars = mkVisFunTys (map mkTyVarTy vars) hole_ty
+#else
+        wrapWithVars vars = mkFunTys (map mkTyVarTy vars) hole_ty
+#endif
 
 holeCtOcc :: Ct -> Maybe OccName
 holeCtOcc CHoleCan{cc_hole=hole@(ExprHole (TrueExprHole occ))} = Just occ
@@ -679,16 +727,18 @@ byCommons :: OccName -> [HoleFit] -> TcM [HoleFit]
 byCommons name fits = return $
   case occNameString name of
     "_" -> fits
-    '_':name -> [fst (maximumBy (compare `on` snd) $
-                    map (id &&& computeCommons name) fits)]
+           --pprPanic "fits" $ ppr fits
+    name -> [fst (maximumBy (compare `on` snd) $
+                  map (id &&& computeCommons name) fits)]
+
   where commons :: Eq a => [a] -> [a] -> Int
         commons s1a@(s1:s1s) s2a@(s2:s2s)
           | s1 == s2 = 1 + commons s1s s2s
           | otherwise = max (commons s1s s2a) (commons s1a s2s)
         commons _ _ = 0
         computeCommons :: String -> HoleFit -> Int
-        computeCommons name = commons (sort name)
-                                . sort . occNameString . occName . hfId
+        computeCommons name = commons name
+                                . occNameString . occName . hfId
 
 -- We don't want any raw hole fits, since we need the actual ids.
 isCooked :: HoleFit -> Bool
@@ -703,21 +753,32 @@ candToCore ct fit@HoleFit{..}  = do
     -- We know it's going to be true, since it came from tcFilterHoleFits. We
     -- also don't have to worry about unification, since we're explicitly using
     -- THIS fit.
+    (ty, vars) <- mkRefTy ct (length hfMatches)
 #if __GLASGOW_HASKELL__ < 810
-    ((True, wrp)) <- tcCheckHoleFit emptyBag [] (ctPred ct) hfType
+    ((True, wrp)) <- tcCheckHoleFit emptyBag [] ty hfType
 #else
     let ty_h = TyH emptyBag [] (Just ct)
-    ((True, wrp)) <- tcCheckHoleFit ty_h (ctPred ct) hfType
+    ((True, wrp)) <- tcCheckHoleFit ty_h ty hfType
 #endif
-    term <- ($ Var hfId) <$> (initDsTc $ dsHsWrapper wrp)
+    new_holes <- mapM (newHole ct) (zip hfMatches [0..])
+    let dicts = map (Var . ctEvEvId . ctEvidence) new_holes
+    term <- flip mkApps dicts . ($ (Var hfId)) <$> (initDsTc $ dsHsWrapper wrp)
     let evVars = nonDetEltsUniqSet $ evVarsOfTerm (EvExpr term)
-    return (term, map evToCt evVars)
+    return (term, map evToCt evVars ++ new_holes)
   where evToCt :: EvVar -> Ct
         evToCt var = CNonCanonical (CtWanted{..})
           where ctev_dest = EvVarDest (setIdExported var)
                 ctev_loc = ctLoc ct
                 ctev_pred = varType var
                 ctev_nosh = WDeriv
+
+newHole :: Ct -> (PredType, Int) -> TcM Ct
+newHole ct (hole_ty, n) = do
+     let Just holeOcc = holeCtOcc ct
+     name <- newSysName $ mkVarOcc (occNameString holeOcc ++ "$" ++ show n)
+     let hole = ExprHole (TrueExprHole $ occName name)
+         var = setIdExported $ mkLocalIdOrCoVar name hole_ty
+     flip setCtLoc (ctLoc ct) <$> TcM.newHoleCt hole var hole_ty
 
 -- From TcHoleErrors (it's not exported)
 getCandsInScope :: Ct -> TcM [HoleFitCandidate]
