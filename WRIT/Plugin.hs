@@ -614,10 +614,20 @@ solveHole :: SolveFun
 solveHole ptc@PTC{..} ct@CHoleCan{cc_ev=CtWanted{ctev_dest=EvVarDest evVar},
                                   cc_hole=hole@(ExprHole (TrueExprHole occ))} =
   do let ty = ctPred ct
-     fits <-
+     fits <- do
+#if __GLASGOW_HASKELL__ >= 810
+      hfPlugs <- tcg_hf_plugins <$> getGblEnv
+      let ty_h = TyH emptyBag [] (Just ct)
+          (candidatePlugins, fitPlugins) =
+             unzip $ map (\p-> ((candPlugin p) hole, (fitPlugin p) ct))
+#else
+      let (candidatePlugins, fitPlugins) = ([],[])
+#endif
       unsafeTcPluginTcM $ getCandsInScope ct
+                        >>= flip (foldM (flip ($))) candidatePlugins
                         >>= fmap snd . tcFilterHoleFits Nothing [] [] (ty, [])
                         >>= sortByGraph
+                        >>= flip (foldM (flip ($))) fitPlugins
      -- We should pick a good "fit" here, taking the first after sorting by
      -- subsumption is something, but picking a good fit is a whole research
      -- field.
