@@ -271,13 +271,16 @@ addWarning dflags log = tcPluginIO $ warn (ppr log)
 data Flags = Flags { f_debug            :: Bool
                    , f_quiet            :: Bool
                    , f_keep_errors      :: Bool
-                   , f_marshal_dynamics :: Bool } deriving (Show)
+                   , f_marshal_dynamics :: Bool
+                   , f_fill_holes :: Bool
+                    } deriving (Show)
 
 getFlags :: [CommandLineOption] -> Flags
 getFlags opts = Flags { f_debug                 = "debug"            `elem` opts
                       , f_quiet                 = "quiet"            `elem` opts
                       , f_keep_errors           = "keep-errors"      `elem` opts
-                      , f_marshal_dynamics      = "marshal-dynamics" `elem` opts }
+                      , f_marshal_dynamics      = "marshal-dynamics" `elem` opts
+                      , f_fill_holes            = "fill-holes" `elem` opts }
 
 gritPlugin :: [CommandLineOption] -> TcPlugin
 gritPlugin opts = TcPlugin initialize solve stop
@@ -312,8 +315,8 @@ gritPlugin opts = TcPlugin initialize solve stop
                                       logs `Set.union` new_logs))
            order :: [(SolveFun, String)]
            order = [ (solveOnlyIf,    "OnlyIf")
-                   , (solveDischarge, "Discharging")
-                   , (solveHole, "Hole")
+                   , (solveDischarge flags, "Discharging")
+                   , (solveHole flags, "Hole")
                    , (solveIgnore,    "Ignoring")
                    , (solveDefault,   "Defaulting") ]
            to_check = wanted ++ derived
@@ -434,8 +437,8 @@ solveIgnore _ ct = wontSolve ct
 
 -- | Solves Γ |- (a :: k) ~ (b :: k) if Γ |- Discharge a b ~ Msg m.
 -- Requires flags for marshal-dynamics
-solveDischarge :: SolveFun
-solveDischarge ptc@PTC{..} ct =
+solveDischarge :: Flags -> SolveFun
+solveDischarge Flags{..} ptc@PTC{..} ct =
   case splitEquality (ctPred ct) of
     Just (k1,ty1,ty2) -> do
       let discharge = mkTyConApp ptc_discharge [k1, ty1, ty2]
@@ -459,9 +462,8 @@ solveDischarge ptc@PTC{..} ct =
           isDyn ty = ty `tcEqType` dynamic
       missingPromote <- (&&) kIsType . not <$> hasInst promote
       if not hasDischarge || missingPromote
-      then -- if kIsType && (isDyn ty1 || isDyn ty2)
-           -- then marshalDynamic k1 ty1 ty2 ptc ct else
-           wontSolve ct
+      then if f_marshal_dynamics && kIsType && (isDyn ty1 || isDyn ty2)
+           then marshalDynamic k1 ty1 ty2 ptc ct else wontSolve ct
       else do (msg_check, msg_var) <- checkMsg ptc ct discharge
               let log = Set.singleton (Log msg_var (ctLoc ct))
                   proof = mkProof "grit-discharge" ty1 ty2
@@ -656,9 +658,10 @@ coreDyn clo tds = return $ (CoreDoPluginPass "WRIT" $ bindsOnlyPass addDyn):tds
 
 
 -- Typed-Holes
-solveHole :: SolveFun
-solveHole ptc@PTC{..} ct@CHoleCan{cc_ev=CtWanted{ctev_dest=EvVarDest evVar},
-                                  cc_hole=hole@(ExprHole (TrueExprHole occ))} =
+solveHole :: Flags -> SolveFun
+solveHole Flags{f_fill_holes=True} ptc@PTC{..}
+  ct@CHoleCan{cc_ev=CtWanted{ctev_dest=EvVarDest evVar},
+              cc_hole=hole@(ExprHole (TrueExprHole occ))} =
   do fits <- do
 #if __GLASGOW_HASKELL__ >= 810
       hfPlugs <- unsafeTcPluginTcM $ tcg_hf_plugins <$> getGblEnv
@@ -670,19 +673,17 @@ solveHole ptc@PTC{..} ct@CHoleCan{cc_ev=CtWanted{ctev_dest=EvVarDest evVar},
       let (candidatePlugins, fitPlugins) = ([],[byCommons occ])
           holeFilter = flip (tcFilterHoleFits Nothing [] [])
 #endif
-      unsafeTcPluginTcM $
         -- We generate refinement-level-hole-fits as well, but we don't want to
         -- loop indefinitely, so we only go down one level.
-        do ref_lvl <- refLevelHoleFits <$> getDynFlags
-           let ty_lvl = case (split '$' $ occNameString occ) of
-                         _:num:_ -> 0
-                         _ -> case ref_lvl of
-                                Just n -> n
-                                _ -> 0
-           ref_tys <-  mapM (mkRefTy ct) [0..ty_lvl]
-           cands <- getCandsInScope ct >>= flip (foldM (flip ($))) candidatePlugins
-           concat <$> mapM (\t -> fmap snd (holeFilter cands t) >>= sortByGraph) ref_tys
-             >>= fmap (filter isCooked) . flip (foldM (flip ($))) fitPlugins
+      unsafeTcPluginTcM $
+       do ref_lvl <- refLevelHoleFits <$> getDynFlags
+          let ty_lvl = case (split '$' $ occNameString occ) of
+                         _:_:_ -> 0
+                         _ -> fromMaybe 0 ref_lvl
+          ref_tys <-  mapM (mkRefTy ct) [0..ty_lvl]
+          cands <- getCandsInScope ct >>= flip (foldM (flip ($))) candidatePlugins
+          concat <$> mapM (\t -> fmap snd (holeFilter cands t) >>= sortByGraph) ref_tys
+            >>= fmap (filter isCooked) . flip (foldM (flip ($))) fitPlugins
 
      -- We should pick a good "fit" here, taking the first after sorting by
      -- subsumption is something, but picking a good fit is a whole research
@@ -690,17 +691,14 @@ solveHole ptc@PTC{..} ct@CHoleCan{cc_ev=CtWanted{ctev_dest=EvVarDest evVar},
      case fits of
        (fit:_) -> do
          (core, needed) <- unsafeTcPluginTcM $ candToCore ct fit
-         let holeName (CHoleCan _ (ExprHole (TrueExprHole occ))) = Just (ppr occ)
-             holeName _ = Nothing
-             holeNames = mapMaybe holeName needed
-             log = Set.singleton $ LogSDoc hole_ty (ctLoc ct) $ text "replacing"
-                     <+> quotes (ppr (holeOcc hole) <+> dcolon <+> ppr hole_ty)
-                     <+> text "with"
-                     <+> quotes (foldl (<+>) (ppr (hfId fit)) holeNames)
-         couldSolve (Just (EvExpr core , ct)) needed log
+         let holeNames = mapMaybe (fmap ppr . holeCtOcc) needed
+             log = Set.singleton $ LogSDoc (ctPred ct) (ctLoc ct) $ text "replacing"
+                 <+> quotes (ppr (holeOcc hole) <+> dcolon <+> ppr (ctPred ct))
+                 <+> text "with"
+                 <+> quotes (foldl (<+>) (ppr (hfId fit)) holeNames)
+         couldSolve (Just (EvExpr core, ct)) needed log
        _ -> wontSolve ct
-  where hole_ty = ctPred ct
-solveHole _ ct = wontSolve ct
+solveHole _ _ ct = wontSolve ct
 
 
 

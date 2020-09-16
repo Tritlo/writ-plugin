@@ -1,5 +1,6 @@
 {-# OPTIONS_GHC -fplugin=WRIT.Plugin
                 -frefinement-level-hole-fits=2
+                -fplugin-opt=WRIT.Plugin:fill-holes
  #-}
 {-# LANGUAGE ScopedTypeVariables #-}
 module Main where
