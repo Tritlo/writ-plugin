@@ -15,7 +15,8 @@ import Control.Monad (when, unless, guard, foldM, zipWithM, msum)
 import Data.Maybe (mapMaybe, catMaybes, fromMaybe, fromJust, listToMaybe, isJust)
 import Data.Either
 import Data.IORef
-import Data.List (intersperse, or, partition)
+import Data.List (intersperse, or, partition, minimumBy, maximumBy, sort)
+import Control.Arrow ((&&&))
 import Data.Function (on)
 import Data.Kind (Constraint)
 import Data.Data (Data, toConstr)
@@ -621,7 +622,7 @@ solveHole ptc@PTC{..} ct@CHoleCan{cc_ev=CtWanted{ctev_dest=EvVarDest evVar},
           (candidatePlugins, fitPlugins) =
              unzip $ map (\p-> ((candPlugin p) hole, (fitPlugin p) ct))
 #else
-      let (candidatePlugins, fitPlugins) = ([],[])
+      let (candidatePlugins, fitPlugins) = ([],[return . byCommons occ])
 #endif
       unsafeTcPluginTcM $ getCandsInScope ct
                         >>= flip (foldM (flip ($))) candidatePlugins
@@ -639,7 +640,25 @@ solveHole ptc@PTC{..} ct@CHoleCan{cc_ev=CtWanted{ctev_dest=EvVarDest evVar},
          (core, needed) <- unsafeTcPluginTcM $ candToCore ct fit
          couldSolve (Just (EvExpr core , ct)) needed log
        _ -> wontSolve ct
+
+  where -- A simple "hole fit plugin", as an example to use when hole fit
+        -- plugins aren't available.
+        byCommons :: OccName -> [HoleFit] -> [HoleFit]
+        byCommons name fits =
+          case occNameString name of
+            "_" -> fits
+            '_':name -> [fst (maximumBy (compare `on` snd) $
+                           map (id &&& computeCommons name) fits)]
+          where commons :: Eq a => [a] -> [a] -> Int
+                commons s1a@(s1:s1s) s2a@(s2:s2s)
+                  | s1 == s2 = 1 + commons s1s s2s
+                  | otherwise = max (commons s1s s2a) (commons s1a s2s)
+                commons _ _ = 0
+                computeCommons :: String -> HoleFit -> Int
+                computeCommons name = commons (sort name)
+                                    . sort . occNameString . occName . hfId
 solveHole _ ct = wontSolve ct
+
 
 -- We don't want any raw hole fits, since we need the actual ids.
 isCooked :: HoleFit -> Bool

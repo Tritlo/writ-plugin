@@ -11,4 +11,4 @@ import Data.Dynamic
 import Data.Maybe (mapMaybe)
 
 main :: IO ()
-main = do print (_0 :: Bool)
+main = do print (_min :: Bool)
