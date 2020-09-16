@@ -15,7 +15,7 @@ import Control.Monad (when, unless, guard, foldM, zipWithM, msum)
 import Data.Maybe (mapMaybe, catMaybes, fromMaybe, fromJust, listToMaybe, isJust)
 import Data.Either
 import Data.IORef
-import Data.List (intersperse, or)
+import Data.List (intersperse, or, partition)
 import Data.Function (on)
 import Data.Kind (Constraint)
 import Data.Data (Data, toConstr)
@@ -92,6 +92,16 @@ import HsExpr
 import TcEvTerm (evCallStack)
 -------
 
+-- Holefits
+import RdrName (globalRdrEnvElts)
+import TcRnMonad (getGlobalRdrEnv, captureConstraints, pushLevelAndCaptureConstraints)
+import TcHoleErrors
+import PrelInfo (knownKeyNames)
+import Data.Graph (graphFromEdges, topSort)
+import Control.Monad (filterM)
+import DsBinds (dsHsWrapper)
+import DsMonad (initDsTc)
+
 #if __GLASGOW_HASKELL__ < 810
 
 -- Backported from 8.10
@@ -124,17 +134,12 @@ data Log = Log { log_pred_ty :: Type, log_loc :: CtLoc}
          | LogDefault { log_pred_ty :: Type, log_loc :: CtLoc,
                         log_var :: Var, log_kind :: Kind, log_res :: Type }
          | LogMarshal { log_pred_ty :: Type, log_loc :: CtLoc, log_to_dyn :: Bool}
-
+         | LogSDoc {log_pred_ty :: Type, log_loc :: CtLoc, log_msg :: SDoc}
 logSrc :: Log -> RealSrcSpan
 logSrc = ctLocSpan . log_loc
 
 instance Ord Log where
-  compare a b = if logSrc a == logSrc b
-                then case (a,b) of
-                  (Log{}, _) -> GT
-                  (LogDefault{}, _) -> LT
-                  (_, _) -> EQ
-                else compare (logSrc a) (logSrc b)
+  compare = compare `on` logSrc
 
 instance Eq Log where
    a@Log{} == b@Log{} =
@@ -144,10 +149,13 @@ instance Eq Log where
                               && ((==) `on` log_var) a b
    a@LogMarshal{} == b@LogMarshal{} =
        ((==) `on` logSrc) a b && (eqType `on` log_pred_ty) a b
+   a@LogSDoc{} == b@LogSDoc{} =
+       ((==) `on` logSrc) a b && (eqType `on` log_pred_ty) a b
 
    Log{} == _ = False
    LogDefault{} == _ = False
    LogMarshal{} == _ = False
+   LogSDoc{} == _ = False
 
 instance Outputable Log where
    -- We do some extra work to pretty print the Defaulting messages
@@ -170,6 +178,7 @@ instance Outputable Log where
                              , text (if log_to_dyn
                                      then "to Dynamic"
                                      else "from Dynamic") ]
+   ppr LogSDoc{..} = log_msg
 
 zonkLog :: Log -> TcPluginM Log
 zonkLog log@Log{..} = do zonked <- zonkTcType log_pred_ty
@@ -258,7 +267,8 @@ gritPlugin opts = TcPlugin initialize solve stop
                                       logs `Set.union` new_logs))
            order :: [(SolveFun, String)]
            order = [ (solveOnlyIf,    "OnlyIf")
-                   , (solveDischarge flags, "Discharging")
+                   , (solveDischarge, "Discharging")
+                   , (solveHole, "Hole")
                    , (solveIgnore,    "Ignoring")
                    , (solveDefault,   "Defaulting") ]
            to_check = wanted ++ derived
@@ -379,8 +389,8 @@ solveIgnore _ ct = wontSolve ct
 
 -- | Solves Γ |- (a :: k) ~ (b :: k) if Γ |- Discharge a b ~ Msg m.
 -- Requires flags for marshal-dynamics
-solveDischarge :: Flags -> SolveFun
-solveDischarge Flags{..} ptc@PTC{..} ct =
+solveDischarge :: SolveFun
+solveDischarge ptc@PTC{..} ct =
   case splitEquality (ctPred ct) of
     Just (k1,ty1,ty2) -> do
       let discharge = mkTyConApp ptc_discharge [k1, ty1, ty2]
@@ -404,7 +414,7 @@ solveDischarge Flags{..} ptc@PTC{..} ct =
           isDyn ty = ty `tcEqType` dynamic
       missingPromote <- (&&) kIsType . not <$> hasInst promote
       if not hasDischarge || missingPromote
-      then if f_marshal_dynamics && kIsType && (isDyn ty1 || isDyn ty2)
+      then if kIsType && (isDyn ty1 || isDyn ty2)
            then marshalDynamic k1 ty1 ty2 ptc ct
            else wontSolve ct
       else do (msg_check, msg_var) <- checkMsg ptc ct discharge
@@ -548,7 +558,7 @@ mkFromDynErrCallStack fdid ct csDict =
         var = Var csDict
         coercion = mkSymCo (unwrapIP (exprType var))
 
--- Post-processing for f_dynamic
+-- Post-processing for Dynamics
 coreDyn :: [CommandLineOption] -> [CoreToDo] -> CoreM [CoreToDo]
 coreDyn clo tds = return $ (CoreDoPluginPass "WRIT" $ bindsOnlyPass addDyn):tds
   where Flags {..} = getFlags clo
@@ -598,3 +608,90 @@ coreDyn clo tds = return $ (CoreDoPluginPass "WRIT" $ bindsOnlyPass addDyn):tds
         addDynToAlt (c, bs, expr) =
             do nexpr <- addDynToExpr expr
                return (c, bs, nexpr)
+
+-- Typed-Holes
+solveHole :: SolveFun
+solveHole ptc@PTC{..} ct@CHoleCan{cc_ev=CtWanted{ctev_dest=EvVarDest evVar},
+                                  cc_hole=hole@(ExprHole (TrueExprHole occ))} =
+  do let ty = ctPred ct
+     fits <-
+      unsafeTcPluginTcM $ getCandsInScope ct
+                        >>= fmap snd . tcFilterHoleFits Nothing [] [] (ty, [])
+                        >>= sortByGraph
+     -- We should pick a good "fit" here, taking the first after sorting by
+     -- subsumption is something, but picking a good fit is a whole research
+     -- field.
+     case fits of
+       (fit:_) -> do
+         let log = Set.singleton $ LogSDoc ty (ctLoc ct) $ text "replacing"
+                     <+> quotes (ppr (holeOcc hole) <+> dcolon <+> ppr (ctPred ct))
+                     <+> text "with" <+> quotes (ppr (hfId fit))
+         (core, needed) <- unsafeTcPluginTcM $ candToCore ct fit
+         couldSolve (Just (EvExpr core , ct)) needed log
+       _ -> wontSolve ct
+solveHole _ ct = wontSolve ct
+
+candToCore :: Ct -> HoleFit -> TcM (CoreExpr, [Ct])
+candToCore ct fit@HoleFit{..}  = do
+    --check_cts <- mapM (fmap exportWanted . mkWanted (ctLoc ct)) checks
+    -- We know it's going to be true, since it came from tcFilterHoleFits. We
+    -- also don't have to worry about unification, since we're explicitly using
+    -- THIS fit.
+    ((True, wrp)) <- tcCheckHoleFit emptyBag [] (ctPred ct) hfType
+    term <- ($ Var hfId) <$> (initDsTc $ dsHsWrapper wrp)
+    let evVars = nonDetEltsUniqSet $ evVarsOfTerm (EvExpr term)
+    return (term, map evToCt evVars)
+  where evToCt :: EvVar -> Ct
+        evToCt var = CNonCanonical (CtWanted{..})
+          where ctev_dest = EvVarDest (setIdExported var)
+                ctev_loc = ctLoc ct
+                ctev_pred = varType var
+                ctev_nosh = WDeriv
+
+-- From TcHoleErrors (it's not exported)
+getCandsInScope :: Ct -> TcM [HoleFitCandidate]
+getCandsInScope ct = do
+  rdr_env <- getGlobalRdrEnv
+  lcl_binds <- getLocalBindings ct
+  let (lcl, gbl) = partition gre_lcl (globalRdrEnvElts rdr_env)
+      locals = removeBindingShadowing $ map IdHFCand lcl_binds
+                                        ++ map GreHFCand lcl
+      builtIns = filter isBuiltInSyntax knownKeyNames
+      globals = map GreHFCand gbl
+      syntax = map NameHFCand builtIns
+  return $ locals ++ syntax ++ globals
+  where getLocalBindings :: Ct -> TcM [Id]
+        getLocalBindings ct =
+          go [] (removeBindingShadowing $ tcl_bndrs lcl_env)
+          where loc     = ctEvLoc (ctEvidence ct)
+                lcl_env = ctLocEnv loc
+                go :: [Id] -> [TcBinder] -> TcM [Id]
+                go sofar [] = return (reverse sofar)
+                go sofar (tc_bndr : tc_bndrs) =
+                    case tc_bndr of
+                      TcIdBndr id _ -> keep_it id
+                      _ -> discard_it
+                  where discard_it = go sofar tc_bndrs
+                        keep_it id = go (id:sofar) tc_bndrs
+
+-- Also from TcHoleErrors
+sortByGraph :: [HoleFit] -> TcM [HoleFit]
+sortByGraph fits = go [] fits
+  where tcSubsumesWCloning :: TcType -> TcType -> TcM Bool
+        tcSubsumesWCloning ht ty = withoutUnification fvs (tcSubsumes ht ty)
+          where fvs = tyCoFVsOfTypes [ht,ty]
+        hfIsLcl :: HoleFit -> Bool
+        hfIsLcl hf = case hfCand hf of
+                      IdHFCand _    -> True
+                      NameHFCand _  -> False
+                      GreHFCand gre -> gre_lcl gre
+        go :: [(HoleFit, [HoleFit])] -> [HoleFit] -> TcM [HoleFit]
+        go sofar [] = return $ uncurry (++) $ partition hfIsLcl topSorted
+          where toV (hf, adjs) = (hf, hfId hf, map hfId adjs)
+                (graph, fromV, _) = graphFromEdges $ map toV sofar
+                topSorted :: [HoleFit]
+                topSorted = map ((\(h,_,_) -> h) . fromV) $ topSort graph
+        go sofar (hf:hfs) =
+          do { adjs <-
+                 filterM (tcSubsumesWCloning (hfType hf) . hfType) fits
+             ; go ((hf, adjs):sofar) hfs }

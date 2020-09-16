@@ -2,3 +2,4 @@ packages: ./
           ./TestIFC
           ./TestVec
           ./TestDyn
+          ./TestSyn
