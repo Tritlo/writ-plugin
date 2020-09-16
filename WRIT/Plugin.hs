@@ -627,10 +627,10 @@ solveHole ptc@PTC{..} ct@CHoleCan{cc_ev=CtWanted{ctev_dest=EvVarDest evVar},
                         >>= flip (foldM (flip ($))) candidatePlugins
                         >>= fmap snd . tcFilterHoleFits Nothing [] [] (ty, [])
                         >>= sortByGraph
-                        >>= flip (foldM (flip ($))) fitPlugins
+                        >>= fmap (filter isCooked) . flip (foldM (flip ($))) fitPlugins
      -- We should pick a good "fit" here, taking the first after sorting by
      -- subsumption is something, but picking a good fit is a whole research
-     -- field.
+     -- field. We delegate that part to any installed hole fit plugins.
      case fits of
        (fit:_) -> do
          let log = Set.singleton $ LogSDoc ty (ctLoc ct) $ text "replacing"
@@ -640,6 +640,11 @@ solveHole ptc@PTC{..} ct@CHoleCan{cc_ev=CtWanted{ctev_dest=EvVarDest evVar},
          couldSolve (Just (EvExpr core , ct)) needed log
        _ -> wontSolve ct
 solveHole _ ct = wontSolve ct
+
+-- We don't want any raw hole fits, since we need the actual ids.
+isCooked :: HoleFit -> Bool
+isCooked HoleFit{..} = True
+isCooked _ = False
 
 candToCore :: Ct -> HoleFit -> TcM (CoreExpr, [Ct])
 candToCore ct fit@HoleFit{..}  = do
