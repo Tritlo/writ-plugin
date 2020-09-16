@@ -542,7 +542,9 @@ hasInst ty = case splitTyConApp_maybe ty of
               Just (tc, args) -> isJust <$> matchFam tc args
               _ -> return False
 
--- Dynamic extension:
+----------------------------------------------------------------
+-- Marshalling to and from Dynamic
+----------------------------------------------------------------
 
 data PluginState = PS { evMap :: Map FastString EvExpr , next :: Int }
 
@@ -657,7 +659,9 @@ coreDyn clo tds = return $ (CoreDoPluginPass "WRIT" $ bindsOnlyPass addDyn):tds
                return (c, bs, nexpr)
 
 
--- Typed-Holes
+----------------------------------------------------------------
+-- Filling typed-holes
+----------------------------------------------------------------
 solveHole :: Flags -> SolveFun
 solveHole Flags{f_fill_holes=True} ptc@PTC{..}
   ct@CHoleCan{cc_ev=CtWanted{ctev_dest=EvVarDest evVar},
