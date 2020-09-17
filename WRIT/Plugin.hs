@@ -15,7 +15,7 @@ import Control.Monad (when, unless, guard, foldM, zipWithM, msum)
 import Data.Maybe (mapMaybe, catMaybes, fromMaybe, fromJust, listToMaybe, isJust)
 import Data.Either
 import Data.IORef
-import Data.List (intersperse, or, partition, minimumBy, maximumBy, sort)
+import Data.List (nubBy, sortOn, intersperse, or, partition, minimumBy, maximumBy, sort)
 import Control.Arrow ((&&&))
 import Data.Function (on)
 import Data.Kind (Constraint)
@@ -692,7 +692,9 @@ solveHole flags@Flags{f_fill_holes=True} other_cts ptc@PTC{..}
                          _ -> fromMaybe 0 ref_lvl
           ref_tys <-  mapM (mkRefTy ct) [0..ty_lvl]
           cands <- getCandsInScope ct >>= flip (foldM (flip ($))) candidatePlugins
-          concat <$> mapM (\t -> fmap snd (holeFilter cands t) >>= sortByGraph) ref_tys
+          fits <- mapM (\t -> fmap snd (holeFilter cands t)) ref_tys
+          if (sum $ map length fits) == 0 then return []
+          else concat <$> mapM sortByGraph fits
             >>= fmap (filter isCooked) . flip (foldM (flip ($))) fitPlugins
      -- We should pick a good "fit" here, taking the first after sorting by
      -- subsumption is something, but picking a good fit is a whole research
@@ -825,6 +827,12 @@ getCandsInScope ct = do
                         keep_it id = go (id:sofar) tc_bndrs
 
 -- Also from TcHoleErrors
+
+sortBySize :: [HoleFit] -> TcM [HoleFit]
+sortBySize = return . sortOn sizeOfFit
+  where sizeOfFit :: HoleFit -> TypeSize
+        sizeOfFit = sizeTypes . nubBy tcEqType .  hfWrap
+
 sortByGraph :: [HoleFit] -> TcM [HoleFit]
 sortByGraph fits = go [] fits
   where tcSubsumesWCloning :: TcType -> TcType -> TcM Bool
