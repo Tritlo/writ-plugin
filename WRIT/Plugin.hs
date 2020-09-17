@@ -35,6 +35,7 @@ import qualified Data.Map.Strict as Map
 import System.IO.Unsafe (unsafePerformIO)
 
 import Bag
+import FV (fvVarSet)
 
 #if __GLASGOW_HASKELL__ > 810
 import GHC.Plugins hiding (TcPlugin)
@@ -282,6 +283,10 @@ getFlags opts = Flags { f_debug                 = "debug"            `elem` opts
                       , f_marshal_dynamics      = "marshal-dynamics" `elem` opts
                       , f_fill_holes            = "fill-holes" `elem` opts }
 
+pprOut :: Outputable a => String -> a -> TcPluginM ()
+pprOut str a = do dflags <- unsafeTcPluginTcM getDynFlags
+                  tcPluginIO $ putStrLn (str ++ " " ++ showSDoc dflags (ppr a))
+
 gritPlugin :: [CommandLineOption] -> TcPlugin
 gritPlugin opts = TcPlugin initialize solve stop
   where
@@ -294,8 +299,7 @@ gritPlugin opts = TcPlugin initialize solve stop
     solve warns given derived wanted = do
        dflags <- unsafeTcPluginTcM getDynFlags
        let pprDebug :: Outputable a => String -> a -> TcPluginM ()
-           pprDebug str a = when f_debug $
-               tcPluginIO $ putStrLn (str ++ " " ++ showSDoc dflags (ppr a))
+           pprDebug str a = when f_debug $ pprOut str a
        pprDebug "Solving" empty
        pprDebug "-------" empty
        mapM_ (pprDebug "Given:") given
@@ -316,7 +320,7 @@ gritPlugin opts = TcPlugin initialize solve stop
            order :: [(SolveFun, String)]
            order = [ (solveOnlyIf,    "OnlyIf")
                    , (solveDischarge flags, "Discharging")
-                   , (solveHole flags, "Hole")
+                   , (solveHole flags (wanted ++ derived), "Hole")
                    , (solveIgnore,    "Ignoring")
                    , (solveDefault,   "Defaulting") ]
            to_check = wanted ++ derived
@@ -662,20 +666,22 @@ coreDyn clo tds = return $ (CoreDoPluginPass "WRIT" $ bindsOnlyPass addDyn):tds
 ----------------------------------------------------------------
 -- Filling typed-holes
 ----------------------------------------------------------------
-solveHole :: Flags -> SolveFun
-solveHole Flags{f_fill_holes=True} ptc@PTC{..}
+solveHole :: Flags -> [Ct] -> SolveFun
+solveHole flags@Flags{f_fill_holes=True} other_cts ptc@PTC{..}
   ct@CHoleCan{cc_ev=CtWanted{ctev_dest=EvVarDest evVar},
               cc_hole=hole@(ExprHole (TrueExprHole occ))} =
   do fits <- do
+      -- We don't need to wrap the implics here, because we are already there
+      -- in the environment
 #if __GLASGOW_HASKELL__ >= 810
       hfPlugs <- unsafeTcPluginTcM $ tcg_hf_plugins <$> getGblEnv
-      let ty_h = TyH emptyBag [] (Just ct)
+      let ty_h = TyH (listToBag relCts) [] (Just ct)
           (candidatePlugins, fitPlugins) =
              unzip $ map (\p-> ((candPlugin p) ty_h, (fitPlugin p) ty_h)) hfPlugs
           holeFilter = flip (tcFilterHoleFits Nothing ty_h)
 #else
       let (candidatePlugins, fitPlugins) = ([],[byCommons occ])
-          holeFilter = flip (tcFilterHoleFits Nothing [] [])
+          holeFilter = flip (tcFilterHoleFits Nothing [] relCts)
 #endif
         -- We generate refinement-level-hole-fits as well, but we don't want to
         -- loop indefinitely, so we only go down one level.
@@ -688,21 +694,24 @@ solveHole Flags{f_fill_holes=True} ptc@PTC{..}
           cands <- getCandsInScope ct >>= flip (foldM (flip ($))) candidatePlugins
           concat <$> mapM (\t -> fmap snd (holeFilter cands t) >>= sortByGraph) ref_tys
             >>= fmap (filter isCooked) . flip (foldM (flip ($))) fitPlugins
-
      -- We should pick a good "fit" here, taking the first after sorting by
      -- subsumption is something, but picking a good fit is a whole research
      -- field. We delegate that part to any installed hole fit plugins.
      case fits of
-       (fit:_) -> do
+       (fit@HoleFit{..}:_) -> do
          (core, needed) <- unsafeTcPluginTcM $ candToCore ct fit
          let holeNames = mapMaybe (fmap ppr . holeCtOcc) needed
              log = Set.singleton $ LogSDoc (ctPred ct) (ctLoc ct) $ text "replacing"
                  <+> quotes (ppr (holeOcc hole) <+> dcolon <+> ppr (ctPred ct))
                  <+> text "with"
-                 <+> quotes (foldl (<+>) (ppr (hfId fit)) holeNames)
-         couldSolve (Just (EvExpr core, ct)) needed log
+                 <+> quotes (foldl (<+>) (ppr hfId) holeNames)
+         -- We have to ensure that we solve the relevantCts.
+         -- We need to make newWanteds here, otherwise we get a loop.
+         want_rel_cts <- mapM (mkWanted (ctLoc ct) . ctPred) relCts
+         couldSolve (Just (EvExpr core, ct)) (needed ++ want_rel_cts) log
        _ -> wontSolve ct
-solveHole _ _ ct = wontSolve ct
+  where relCts = relevantCts ct other_cts
+solveHole _ _ _ ct = wontSolve ct
 
 
 
@@ -751,7 +760,6 @@ isCooked _ = False
 
 candToCore :: Ct -> HoleFit -> TcM (CoreExpr, [Ct])
 candToCore ct fit@HoleFit{..}  = do
-    --check_cts <- mapM (fmap exportWanted . mkWanted (ctLoc ct)) checks
     -- We know it's going to be true, since it came from tcFilterHoleFits. We
     -- also don't have to worry about unification, since we're explicitly using
     -- THIS fit.
@@ -829,3 +837,22 @@ sortByGraph fits = go [] fits
           do { adjs <-
                  filterM (tcSubsumesWCloning (hfType hf) . hfType) fits
              ; go ((hf, adjs):sofar) hfs }
+
+-- Copied from TcHoleErrors
+relevantCts :: Ct -> [Ct] -> [Ct]
+relevantCts hole_ct cts = if isEmptyVarSet (fvVarSet hole_fvs) then []
+              else filter isRelevant cts
+  where ctFreeVarSet :: Ct -> VarSet
+        hole_fvs = tyCoFVsOfType (ctPred hole_ct)
+        ctFreeVarSet = fvVarSet . tyCoFVsOfType . ctPred
+        hole_fv_set = fvVarSet hole_fvs
+        anyFVMentioned :: Ct -> Bool
+        anyFVMentioned ct = not $ isEmptyVarSet $
+                              ctFreeVarSet ct `intersectVarSet` hole_fv_set
+        -- We filter out those constraints that have no variables (since
+        -- they won't be solved by finding a type for the type variable
+        -- representing the hole) and also other holes, since we're not
+        -- trying to find hole fits for many holes at once.
+        isRelevant ct = not (isEmptyVarSet (ctFreeVarSet ct))
+                        && anyFVMentioned ct
+                        && not (isHoleCt ct)
