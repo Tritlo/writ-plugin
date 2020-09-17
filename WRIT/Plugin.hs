@@ -35,7 +35,7 @@ import qualified Data.Map.Strict as Map
 import System.IO.Unsafe (unsafePerformIO)
 
 import Bag
-import FV (fvVarSet)
+import FV (fvVarListVarSet, fvVarSet)
 
 #if __GLASGOW_HASKELL__ > 810
 import GHC.Plugins hiding (TcPlugin)
@@ -91,7 +91,7 @@ import Unify
 
 -- Holefits
 import RdrName (globalRdrEnvElts)
-import TcRnMonad (getGlobalRdrEnv, getGblEnv, newSysName)
+import TcRnMonad (getLclEnv, getGlobalRdrEnv, getGblEnv, newSysName)
 import TcHoleErrors
 import PrelInfo (knownKeyNames)
 import Data.Graph (graphFromEdges, topSort)
@@ -700,9 +700,17 @@ solveHole flags@Flags{f_fill_holes=True} other_cts ptc@PTC{..}
      case fits of
        (fit@HoleFit{..}:_) -> do
          (core, needed) <- unsafeTcPluginTcM $ candToCore ct fit
-         let holeNames = mapMaybe (fmap ppr . holeCtOcc) needed
+         -- We need to pull some shenanigans for prettier printing of the warning.
+         implics <- unsafeTcPluginTcM $ (bagToList . wc_impl)
+                    <$> (tcl_lie <$> getLclEnv >>= (liftIO . readIORef))
+         let fvTy = fvVarSet $ tyCoFVsOfType (ctPred ct)
+             tys = map ctPred relCts ++ concatMap (map idType . ic_given) implics
+             anyMentioned = filter (not . isEmptyVarSet . intersectVarSet fvTy
+                                    . fvVarSet . tyCoFVsOfType ) tys
+             holeNames = mapMaybe (fmap ppr . holeCtOcc) needed
+             pp_ty = wrapType (ctPred ct) [] anyMentioned
              log = Set.singleton $ LogSDoc (ctPred ct) (ctLoc ct) $ text "replacing"
-                 <+> quotes (ppr (holeOcc hole) <+> dcolon <+> ppr (ctPred ct))
+                 <+> quotes (ppr (holeOcc hole) <+> dcolon <+> ppr pp_ty)
                  <+> text "with"
                  <+> quotes (foldl (<+>) (ppr hfId) holeNames)
          -- We have to ensure that we solve the relevantCts.
