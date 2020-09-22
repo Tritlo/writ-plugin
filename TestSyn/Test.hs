@@ -2,6 +2,7 @@
                 -frefinement-level-hole-fits=2
                 -fplugin-opt=WRIT.Plugin:fill-holes
                 -fplugin-opt=WRIT.Plugin:fill-hole-depth=2
+                -dcore-lint
  #-}
 {-# LANGUAGE ScopedTypeVariables #-}
 module Main where
@@ -13,7 +14,7 @@ ps :: Show a => a -> a
 ps a = _
 
 main :: IO ()
-main = do --print LT
-          print $ (_fmap_succ :: [Int] -> [Int]) [1,2]
-          print $ (_foldl_enumTo :: [Int] -> [Int]) [1,2]
+main = do print LT
+        --   print $ (_fmap_succ :: [Int] -> [Int]) [1,2]
+        --   print $ (_foldl_enumTo :: [Int] -> [Int]) [1,2]
 --          print (ps _c)

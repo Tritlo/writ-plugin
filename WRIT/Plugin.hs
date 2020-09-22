@@ -703,7 +703,9 @@ solveHole flags@Flags{f_fill_holes=True, ..} other_cts ptc@PTC{..}
        do ref_lvl <- refLevelHoleFits <$> getDynFlags
           let ty_lvl = if length (split '$' $ occNameString occ) <= f_fill_hole_depth
                        then fromMaybe 0 ref_lvl else 0
+
           ref_tys <-  mapM (mkRefTy ct) [0..ty_lvl]
+          liftIO $ putStrLn $ "rtys" ++ (showSDocUnsafe $ ppr ref_tys)
           cands <- getCandsInScope ct >>= flip (foldM (flip ($))) candidatePlugins
           fits <- mapM (\t -> fmap snd (holeFilter cands t)) ref_tys
           if (sum $ map length fits) == 0 then return []
@@ -714,6 +716,7 @@ solveHole flags@Flags{f_fill_holes=True, ..} other_cts ptc@PTC{..}
      -- field. We delegate that part to any installed hole fit plugins.
      case fits of
        (fit@HoleFit{..}:_) -> do
+         pprOut "ppr" $ ppr fit
          (core, needed) <- unsafeTcPluginTcM $ candToCore ct fit
          -- We need to pull some shenanigans for prettier printing of the warning.
          implics <- unsafeTcPluginTcM $ (bagToList . wc_impl)
@@ -731,6 +734,10 @@ solveHole flags@Flags{f_fill_holes=True, ..} other_cts ptc@PTC{..}
          -- We have to ensure that we solve the relevantCts.
          -- We need to make newWanteds here, otherwise we get a loop.
          want_rel_cts <- mapM (mkWanted (ctLoc ct) . ctPred) relCts
+         pprOut "core" $ ppr core
+         pprOut "ct" $ ppr (ct)
+         pprOut "log" $ ppr log
+         pprOut "new" $ ppr (needed, want_rel_cts)
          couldSolve (Just (EvExpr core, ct)) (needed ++ want_rel_cts) log
        _ -> wontSolve ct
   where relCts = relevantCts ct other_cts
@@ -797,12 +804,18 @@ candToCore ct fit@HoleFit{..}  = do
     let dicts = map (Var . ctEvEvId . ctEvidence) new_holes
     term <- flip mkApps dicts . ($ (Var hfId)) <$> (initDsTc $ dsHsWrapper wrp)
     let evVars = nonDetEltsUniqSet $ evVarsOfTerm (EvExpr term)
-    return (term, map evToCt evVars ++ new_holes)
-  where evToCt :: EvVar -> Ct
-        evToCt var = CNonCanonical (CtWanted{..})
-          where ctev_dest = EvVarDest (setIdExported var)
+    neededEv <- mapM evToCt evVars
+    return (term, neededEv ++ new_holes)
+  where evToCt :: EvVar -> TcM Ct
+        evToCt var = do
+          ctev_dest <-
+           if isCoVar xvar
+           then HoleDest . CoercionHole xvar <$> (liftIO $ newIORef Nothing)
+           else return $ EvVarDest xvar
+          return $ CNonCanonical (CtWanted{..})
+          where xvar = setIdExported var
                 ctev_loc = ctLoc ct
-                ctev_pred = varType var
+                ctev_pred = varType xvar
                 ctev_nosh = WDeriv
 
 newHole :: Ct -> (PredType, Int) -> TcM Ct
