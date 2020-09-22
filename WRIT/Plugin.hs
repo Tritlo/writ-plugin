@@ -26,6 +26,7 @@ import Data.Set (Set)
 import Data.Proxy
 import Data.Dynamic
 import Type.Reflection (someTypeRep)
+import Text.Read (readMaybe)
 
 import GHC.TypeLits(TypeError(..), ErrorMessage(..))
 
@@ -274,6 +275,7 @@ data Flags = Flags { f_debug            :: Bool
                    , f_keep_errors      :: Bool
                    , f_marshal_dynamics :: Bool
                    , f_fill_holes :: Bool
+                   , f_fill_hole_depth :: Int
                     } deriving (Show)
 
 getFlags :: [CommandLineOption] -> Flags
@@ -281,7 +283,19 @@ getFlags opts = Flags { f_debug                 = "debug"            `elem` opts
                       , f_quiet                 = "quiet"            `elem` opts
                       , f_keep_errors           = "keep-errors"      `elem` opts
                       , f_marshal_dynamics      = "marshal-dynamics" `elem` opts
-                      , f_fill_holes            = "fill-holes" `elem` opts }
+                      , f_fill_holes            = "fill-holes" `elem` opts
+                      , f_fill_hole_depth       = getFillHoleDepth opts
+                      }
+
+getFillHoleDepth :: [CommandLineOption] -> Int
+getFillHoleDepth [] = 0
+getFillHoleDepth (o:opts) =
+  case split '=' o of
+     ["fill-hole-depth", n] ->
+        case readMaybe n of
+           Just n -> n
+           _ -> error "WRIT: Invalid fill-hole-depth parameter"
+     _ -> getFillHoleDepth opts
 
 pprOut :: Outputable a => String -> a -> TcPluginM ()
 pprOut str a = do dflags <- unsafeTcPluginTcM getDynFlags
@@ -667,7 +681,7 @@ coreDyn clo tds = return $ (CoreDoPluginPass "WRIT" $ bindsOnlyPass addDyn):tds
 -- Filling typed-holes
 ----------------------------------------------------------------
 solveHole :: Flags -> [Ct] -> SolveFun
-solveHole flags@Flags{f_fill_holes=True} other_cts ptc@PTC{..}
+solveHole flags@Flags{f_fill_holes=True, ..} other_cts ptc@PTC{..}
   ct@CHoleCan{cc_ev=CtWanted{ctev_dest=EvVarDest evVar},
               cc_hole=hole@(ExprHole (TrueExprHole occ))} =
   do fits <- do
@@ -687,9 +701,11 @@ solveHole flags@Flags{f_fill_holes=True} other_cts ptc@PTC{..}
         -- loop indefinitely, so we only go down one level.
       unsafeTcPluginTcM $
        do ref_lvl <- refLevelHoleFits <$> getDynFlags
-          let ty_lvl = case (split '$' $ occNameString occ) of
-                         _:_:_ -> 0
-                         _ -> fromMaybe 0 ref_lvl
+          let spl = (split '$' $ occNameString occ)
+          let ty_lvl = if length (split '$' $ occNameString occ) <= f_fill_hole_depth
+                       then fromMaybe 0 ref_lvl else 0
+
+          liftIO $ putStrLn $ "spl" ++ (showSDocUnsafe $ ppr (spl, length spl, f_fill_hole_depth))
           ref_tys <-  mapM (mkRefTy ct) [0..ty_lvl]
           cands <- getCandsInScope ct >>= flip (foldM (flip ($))) candidatePlugins
           fits <- mapM (\t -> fmap snd (holeFilter cands t)) ref_tys
