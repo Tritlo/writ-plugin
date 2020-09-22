@@ -736,18 +736,11 @@ solveHole flags@Flags{f_fill_holes=True, ..} other_cts ptc@PTC{..}
          -- We have to ensure that we solve the relevantCts.
          -- We need to make newWanteds here, otherwise we get a loop.
          want_rel_cts <- mapM (mkWanted (ctLoc ct) . ctPred) relCts
-         var <- unsafeTcPluginTcM $ globaliseId
-             <$> flip (mkLocalIdOrCoVar) hfType
-             <$> (newSysName $ mkVarOcc ("$hf" ++ (occNameString $
-                                                   occName $ ctEvEvId $ ctEvidence ct)))
-         let ev_b = (EvBind (ctEvEvId $ ctEvidence ct) term False)
-         setEvBind ev_b
          -- Since we might be using local variables, we need to
          -- aggresively inline the holefits. We do this by maintaining
          -- our own evbindmap.
-         tcPluginIO $ addHFEvBind ev_b
+         tcPluginIO $ addHFEvBind $ EvBind (ctEvEvId $ ctEvidence ct) term False
          couldSolve (Just (term, ct)) (needed ++ want_rel_cts) log
-        --  couldSolve (Just (term, ct)) (needed ++ want_rel_cts) log
        _ -> wontSolve ct
   where relCts = relevantCts ct other_cts
 solveHole _ _ _ ct = wontSolve ct
