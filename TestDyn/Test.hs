@@ -15,11 +15,13 @@ k d = fromDyn d 0
 getValsOfTy :: Typeable a => [Dynamic] -> [a]
 getValsOfTy = mapMaybe fromDynamic
 
+
 xs :: [Dynamic]
 xs = ["thanks", (), "i", False,
       "hate", (42 :: Int), "it"]
 
 main :: IO ()
 main = do print xs
-          print $ (castDyn (1 :: Int) :: Integer)
+          print (getValsOfTy @String xs)
+      --     print $ (castDyn (1 :: Int) :: Integer)
           print $ (1 :: Int) + (toDyn (1 :: Integer))

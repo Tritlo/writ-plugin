@@ -8,10 +8,11 @@ module Main where
 import WRIT.Configure
 import Data.Dynamic
 
-ps :: Show a => a -> a
-ps a = _
+-- ps :: Show a => a -> a
+-- ps a = _
 
 main :: IO ()
 main = do --print LT
-          print $ (_fmap_succ :: [Int] -> [Int]) [1,2]
+          --print $ (fmap succ) [1,2]
+          print $ (_maximum :: [Int] -> Int) [1,2]
 --          print (ps _c)

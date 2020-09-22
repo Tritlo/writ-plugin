@@ -91,7 +91,7 @@ import Unify
 
 -- Holefits
 import RdrName (globalRdrEnvElts)
-import TcRnMonad (getLclEnv, getGlobalRdrEnv, getGblEnv, newSysName)
+import TcRnMonad (captureConstraints, emitImplication, getTcLevel, getLclEnv, getGlobalRdrEnv, getGblEnv, newSysName)
 import TcHoleErrors
 import PrelInfo (knownKeyNames)
 import Data.Graph (graphFromEdges, topSort)
@@ -666,6 +666,32 @@ coreDyn clo tds = return $ (CoreDoPluginPass "WRIT" $ bindsOnlyPass addDyn):tds
 ----------------------------------------------------------------
 -- Filling typed-holes
 ----------------------------------------------------------------
+
+pureFit :: Type -> CoreExpr -> TcM HoleFit
+pureFit typ core = do
+  nm <- newSysName (mkVarOcc "$_fit")
+  let hfId = mkExportedLocalId VanillaId nm typ
+      hfCand = IdHFCand hfId
+      hfType = (idType hfId)
+      hfRefLvl = 0
+      hfWrap = []
+      hfMatches = []
+      hfDoc = Nothing
+      evB = EvBind { eb_lhs = hfId
+                   , eb_rhs = EvExpr core
+                   , eb_is_given = False}
+  -- To pass the core expr on, we have to emit an implication.
+  -- This is later grabbed and the binding read from the implication.
+  imp <- newImplication
+  tcl <- getTcLevel
+  binds <- newTcEvBinds
+  addTcEvBind binds evB
+  let nimp = imp { ic_tclvl = tcl
+                 , ic_info=UnkSkol
+                 , ic_binds = binds}
+  emitImplication nimp
+  return $ HoleFit {..}
+
 solveHole :: Flags -> [Ct] -> SolveFun
 solveHole flags@Flags{f_fill_holes=True} other_cts ptc@PTC{..}
   ct@CHoleCan{cc_ev=CtWanted{ctev_dest=EvVarDest evVar},
@@ -685,23 +711,28 @@ solveHole flags@Flags{f_fill_holes=True} other_cts ptc@PTC{..}
 #endif
         -- We generate refinement-level-hole-fits as well, but we don't want to
         -- loop indefinitely, so we only go down one level.
-      unsafeTcPluginTcM $
+      (fs, ws) <- unsafeTcPluginTcM $ captureConstraints $
        do ref_lvl <- refLevelHoleFits <$> getDynFlags
           let ty_lvl = case (split '$' $ occNameString occ) of
                          _:_:_ -> 0
                          _ -> fromMaybe 0 ref_lvl
-          ref_tys <-  mapM (mkRefTy ct) [0..ty_lvl]
+          ref_tys <- mapM (mkRefTy ct) [0..ty_lvl]
           cands <- getCandsInScope ct >>= flip (foldM (flip ($))) candidatePlugins
           fits <- mapM (\t -> fmap snd (holeFilter cands t)) ref_tys
           if (sum $ map length fits) == 0 then return []
           else concat <$> mapM sortByGraph fits
             >>= fmap (filter isCooked) . flip (foldM (flip ($))) fitPlugins
+
+      return fs
      -- We should pick a good "fit" here, taking the first after sorting by
      -- subsumption is something, but picking a good fit is a whole research
      -- field. We delegate that part to any installed hole fit plugins.
+    --  pprOut "fits:" $ ppr fits
      case fits of
        (fit@HoleFit{..}:_) -> do
          (core, needed) <- unsafeTcPluginTcM $ candToCore ct fit
+        --  f <- unsafeTcPluginTcM $ pureFit hfType core
+        --  pprOut "pp" $ ppr f
          -- We need to pull some shenanigans for prettier printing of the warning.
          implics <- unsafeTcPluginTcM $ (bagToList . wc_impl)
                     <$> (tcl_lie <$> getLclEnv >>= (liftIO . readIORef))
@@ -722,8 +753,6 @@ solveHole flags@Flags{f_fill_holes=True} other_cts ptc@PTC{..}
        _ -> wontSolve ct
   where relCts = relevantCts ct other_cts
 solveHole _ _ _ ct = wontSolve ct
-
-
 
 mkRefTy :: Ct -> Int -> TcM (TcType, [TcTyVar])
 mkRefTy ct refLvl = (wrapWithVars &&& id) <$> newTyVars
