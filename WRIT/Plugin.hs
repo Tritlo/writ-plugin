@@ -701,11 +701,8 @@ solveHole flags@Flags{f_fill_holes=True, ..} other_cts ptc@PTC{..}
         -- loop indefinitely, so we only go down one level.
       unsafeTcPluginTcM $
        do ref_lvl <- refLevelHoleFits <$> getDynFlags
-          let spl = (split '$' $ occNameString occ)
           let ty_lvl = if length (split '$' $ occNameString occ) <= f_fill_hole_depth
                        then fromMaybe 0 ref_lvl else 0
-
-          liftIO $ putStrLn $ "spl" ++ (showSDocUnsafe $ ppr (spl, length spl, f_fill_hole_depth))
           ref_tys <-  mapM (mkRefTy ct) [0..ty_lvl]
           cands <- getCandsInScope ct >>= flip (foldM (flip ($))) candidatePlugins
           fits <- mapM (\t -> fmap snd (holeFilter cands t)) ref_tys
