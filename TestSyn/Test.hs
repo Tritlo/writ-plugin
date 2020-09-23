@@ -1,7 +1,7 @@
 {-# OPTIONS_GHC -fplugin=WRIT.Plugin
                 -frefinement-level-hole-fits=2
                 -fplugin-opt=WRIT.Plugin:fill-holes
-                -fplugin-opt=WRIT.Plugin:fill-hole-depth=2
+                -fplugin-opt=WRIT.Plugin:fill-hole-depth=1
                 -dcore-lint
  #-}
 {-# LANGUAGE ScopedTypeVariables #-}
@@ -25,7 +25,7 @@ isOdd arg = not _even_arg
 f :: b -> a -> b
 f = const
 g :: a -> b -> b
-g = _
+g = _fli
 
 
 ps8 :: a -> b -> a

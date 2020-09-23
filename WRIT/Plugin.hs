@@ -917,6 +917,9 @@ lookupHFEvBind var = coerce (flip lookupEvBind var) <$> readIORef holeFitState
 getHFEvBinds :: IO EvBindMap
 getHFEvBinds = coerce <$> readIORef holeFitState
 
+setHFEvBinds :: EvBindMap -> IO ()
+setHFEvBinds = coerce (writeIORef holeFitState)
+
 -- | We have to aggressively inline hole fits, since they depend on the scope of
 -- the hole, which the typechecker plugin interface does not take into account.
 -- In this function, we essentially walk over the typechecked AST, and push any
@@ -930,10 +933,17 @@ getHFEvBinds = coerce <$> readIORef holeFitState
 fixFitScope :: [CommandLineOption] -> ModSummary -> TcGblEnv -> TcM TcGblEnv
 fixFitScope opts _ env@TcGblEnv{..} =
   do HFS hf_ev_binds <- liftIO $ readIORef holeFitState
-     -- We replace our binds with global binds, since they are already zonked.
-     liftIO $ mapBagM_ addHFEvBind $ filterBag (isHFBind hf_ev_binds) tcg_ev_binds
-     HFS zonked_ev_bind_map <- liftIO $ readIORef holeFitState
-     pprOut "zeb: " $ zonked_ev_bind_map
+     -- We replace our binds with global binds, since they are already zonked
+     -- wrt to the evidence bindings.
+     let updateEvBindMap evbMap nbs = foldl extendEvBinds evbMap (bagToList nbs)
+         updated_ev_binds = updateEvBindMap hf_ev_binds $
+                               filterBag (isHFBind hf_ev_binds) tcg_ev_binds
+     -- We do however need to zonk the rest ourselves, since there might be some
+     -- unzonked local binds.
+     zonked_ev_bind_map <- updateEvBindMap updated_ev_binds
+                        <$> (emptyZonkEnv >>= fmap snd .
+                             flip zonkEvBinds (evBindMapBinds updated_ev_binds))
+     liftIO $ setHFEvBinds zonked_ev_bind_map
      nbs <- mapBagM (pL fixBindScope) tcg_binds
      let nonHfBinds = removeCommonBinds zonked_ev_bind_map tcg_ev_binds
      return $ env { tcg_binds = nbs, tcg_ev_binds = nonHfBinds}
