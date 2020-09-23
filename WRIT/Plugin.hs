@@ -959,6 +959,7 @@ fixFitScope opts _ env@TcGblEnv{..} =
                     liftIO $ putStrLn $ msg ++ (showSDocUnsafe $ ppr p)
     removeCommonBinds :: EvBindMap -> Bag EvBind -> Bag EvBind
     removeCommonBinds evbs = filterBag (not . isPresentBind evbs)
+
     -- | fixVarExprScope is where we take the actual varibale and replace
     -- it with it's hole fit definition, thus ensuring that any local
     -- arguments, types and dictionaries that the hole-fit uses is in scope.
@@ -968,8 +969,10 @@ fixFitScope opts _ env@TcGblEnv{..} =
           Just eb -> do evbs <- getHFEvBinds
                         return $ HsWrap x (WpLet (EvBinds $ allRel evbs eb)) hv
           _ -> return hv
-      where -- | Since hole expressions might mention other hole expressiosn,
-            -- we need to find the transitive closure of variables here.
+      where -- | Since hole expressions might mention other hole expressions,
+            -- we need to find the transitive closure of expressions here,
+            -- meaning that we include all bindings we know off, and any
+            -- bindings mentioned in those bindings etc.
             allRel :: EvBindMap -> EvBind -> Bag EvBind
             allRel evbs (EvBind lhs _ _ ) =
                 listToBag $ mapMaybe (lookupEvBind evbs) $
@@ -980,8 +983,7 @@ fixFitScope opts _ env@TcGblEnv{..} =
                     add v cur
                       | Just (EvBind{eb_rhs=EvExpr exp}) <- lookupEvBind evbs v
                       = exprFreeIdsDSet exp `unionDVarSet` cur
-                      | otherwise  = cur
-
+                      | otherwise = cur
 
     -- | fixAbsBindScope removes any let bindings from this level, and
     --  push it down into the binding itself. Note however that we must
@@ -1016,6 +1018,7 @@ fixFitScope opts _ env@TcGblEnv{..} =
       res <- mapBagM (pL fixBindScope) abs_binds
       return $ fb{ abs_binds = res
                  , abs_ev_binds = filter (not . isEmptyTcEvBinds ) $ wrpdBinds:absEvB}
+
     -- | fixOutBinds maps over the nested local binds, but sets the flag to
     -- recursive so that we can redefine any local functions with the right
     -- wrapper in fixAbsBinds. It gets optimized away anyway, in case we
