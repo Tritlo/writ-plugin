@@ -732,8 +732,7 @@ solveHole flags@Flags{f_fill_holes=True, ..} other_cts ptc@PTC{..}
          -- aggresively inline the holefits. We do this by maintaining
          -- our own evBindMap.
          let cid = (ctEvEvId $ ctEvidence ct)
-         --zid <- unsafeTcPluginTcM $ zonkId
-         tcPluginIO $ addHFEvBind $ EvBind cid term False
+         unsafeTcPluginTcM $ addHFEvBind $ EvBind cid term False
          couldSolve (Just (term, ct)) (needed ++ want_rel_cts) log
        _ -> wontSolve ct
   where relCts = relevantCts ct other_cts
@@ -907,18 +906,30 @@ holeFitState :: IORef HoleFitState
 {-# NOINLINE  holeFitState#-}
 holeFitState = unsafePerformIO (newIORef (coerce emptyEvBindMap))
 
-addHFEvBind :: EvBind -> IO ()
+addHFEvBind :: EvBind -> TcM ()
 addHFEvBind bind =
-   modifyIORef holeFitState (coerce $ flip extendEvBinds bind)
+   liftIO $ modifyIORef holeFitState (coerce $ flip extendEvBinds bind)
 
-lookupHFEvBind :: EvVar -> IO (Maybe EvBind)
-lookupHFEvBind var = coerce (flip lookupEvBind var) <$> readIORef holeFitState
+lookupHFEvBind :: EvVar -> TcM (Maybe EvBind)
+lookupHFEvBind var =
+  liftIO $ coerce (flip lookupEvBind var) <$> readIORef holeFitState
 
-getHFEvBinds :: IO EvBindMap
-getHFEvBinds = coerce <$> readIORef holeFitState
+getHFEvBinds :: TcM EvBindMap
+getHFEvBinds = liftIO $ coerce <$> readIORef holeFitState
 
-setHFEvBinds :: EvBindMap -> IO ()
-setHFEvBinds = coerce (writeIORef holeFitState)
+setHFEvBinds :: EvBindMap -> TcM ()
+setHFEvBinds = liftIO . coerce (writeIORef holeFitState)
+
+updateExistingHFBinds :: Bag EvBind -> TcM ()
+updateExistingHFBinds =
+  liftIO . modifyIORef holeFitState . coerce (flip updateExistingBinds)
+
+updateExistingBinds :: EvBindMap -> Bag EvBind -> EvBindMap
+updateExistingBinds evbMap =
+  foldl extendEvBinds evbMap . bagToList . filterBag (isPresentBind evbMap)
+
+isPresentBind :: EvBindMap -> EvBind -> Bool
+isPresentBind evbs (EvBind lhs _ _) = isJust $ lookupEvBind evbs lhs
 
 -- | We have to aggressively inline hole fits, since they depend on the scope of
 -- the hole, which the typechecker plugin interface does not take into account.
@@ -932,241 +943,231 @@ setHFEvBinds = coerce (writeIORef holeFitState)
 -- the rest is just mapping over sub-expressions.
 fixFitScope :: [CommandLineOption] -> ModSummary -> TcGblEnv -> TcM TcGblEnv
 fixFitScope opts _ env@TcGblEnv{..} =
-  do HFS hf_ev_binds <- liftIO $ readIORef holeFitState
-     -- We replace our binds with global binds, since they are already zonked
+  do -- We replace our binds with global binds, since they are already zonked
      -- wrt to the evidence bindings.
-     let updateEvBindMap evbMap nbs = foldl extendEvBinds evbMap (bagToList nbs)
-         updated_ev_binds = updateEvBindMap hf_ev_binds $
-                               filterBag (isHFBind hf_ev_binds) tcg_ev_binds
-     -- We do however need to zonk the rest ourselves, since there might be some
-     -- unzonked local binds.
-     zonked_ev_bind_map <- updateEvBindMap updated_ev_binds
-                        <$> (emptyZonkEnv >>= fmap snd .
-                             flip zonkEvBinds (evBindMapBinds updated_ev_binds))
-     liftIO $ setHFEvBinds zonked_ev_bind_map
+     updateExistingHFBinds tcg_ev_binds
+     hf_ev_binds <- getHFEvBinds
      nbs <- mapBagM (pL fixBindScope) tcg_binds
-     let nonHfBinds = removeCommonBinds zonked_ev_bind_map tcg_ev_binds
-     return $ env { tcg_binds = nbs, tcg_ev_binds = nonHfBinds}
-  where pL :: (a -> TcM a) -> Located a -> TcM (Located a)
-        pL act (L l a) = (L l) <$> (act a)
-        flags@Flags{..} = getFlags opts
-        pprOut :: Outputable a => String -> a -> TcM ()
-        pprOut msg p =
-          when f_debug $
-            liftIO $ putStrLn $ msg ++ (showSDocUnsafe $ ppr p)
-        isHFBind :: EvBindMap -> EvBind -> Bool
-        isHFBind evbs (EvBind lhs _ _) = isJust $ lookupEvBind evbs lhs
-        removeCommonBinds :: EvBindMap -> Bag EvBind -> Bag EvBind
-        removeCommonBinds evbs = filterBag (not . isHFBind evbs)
-        -- | fixVarExprScope is where we take the actual varibale and replace
-        -- it with it's hole fit definition, thus ensuring that any local
-        -- arguments, types and dictionaries that the hole-fit uses is in scope.
-        fixVarExprScope :: HsExpr GhcTc -> TcM (HsExpr GhcTc)
-        fixVarExprScope hv@(HsVar x (L l v)) =
-            (liftIO $ lookupHFEvBind v) >>= \case
-              Just eb -> do evbs <- liftIO getHFEvBinds
-                            return $ HsWrap x (WpLet (EvBinds $ allRel evbs eb)) hv
-              _ -> return hv
-          where -- | Since hole expressions might mention other hole expressiosn,
-                -- we need to find the transitive closure of variables here.
-                allRel :: EvBindMap -> EvBind -> Bag EvBind
-                allRel evbs (EvBind lhs _ _ ) =
-                    listToBag $ mapMaybe (lookupEvBind evbs) $
-                      dVarSetElems $ transCloDVarSet free (unitDVarSet lhs)
-                  where free :: DVarSet -> DVarSet
-                        free = foldDVarSet add emptyDVarSet
-                        add :: Var -> DVarSet -> DVarSet
-                        add v cur
-                          | Just (EvBind{eb_rhs=EvExpr exp}) <- lookupEvBind evbs v
-                          = exprFreeIdsDSet exp `unionDVarSet` cur
-                          | otherwise  = cur
+     return $ env { tcg_binds = nbs
+                  , tcg_ev_binds = removeCommonBinds hf_ev_binds tcg_ev_binds}
+  where
+    pL :: (a -> TcM a) -> Located a -> TcM (Located a)
+    pL act (L l a) = (L l) <$> (act a)
+    flags@Flags{..} = getFlags opts
+    pprOut :: Outputable a => String -> a -> TcM ()
+    pprOut msg p = when f_debug $
+                    liftIO $ putStrLn $ msg ++ (showSDocUnsafe $ ppr p)
+    removeCommonBinds :: EvBindMap -> Bag EvBind -> Bag EvBind
+    removeCommonBinds evbs = filterBag (not . isPresentBind evbs)
+    -- | fixVarExprScope is where we take the actual varibale and replace
+    -- it with it's hole fit definition, thus ensuring that any local
+    -- arguments, types and dictionaries that the hole-fit uses is in scope.
+    fixVarExprScope :: HsExpr GhcTc -> TcM (HsExpr GhcTc)
+    fixVarExprScope hv@(HsVar x (L l v)) =
+        (lookupHFEvBind v) >>= \case
+          Just eb -> do evbs <- getHFEvBinds
+                        return $ HsWrap x (WpLet (EvBinds $ allRel evbs eb)) hv
+          _ -> return hv
+      where -- | Since hole expressions might mention other hole expressiosn,
+            -- we need to find the transitive closure of variables here.
+            allRel :: EvBindMap -> EvBind -> Bag EvBind
+            allRel evbs (EvBind lhs _ _ ) =
+                listToBag $ mapMaybe (lookupEvBind evbs) $
+                  dVarSetElems $ transCloDVarSet free (unitDVarSet lhs)
+              where free :: DVarSet -> DVarSet
+                    free = foldDVarSet add emptyDVarSet
+                    add :: Var -> DVarSet -> DVarSet
+                    add v cur
+                      | Just (EvBind{eb_rhs=EvExpr exp}) <- lookupEvBind evbs v
+                      = exprFreeIdsDSet exp `unionDVarSet` cur
+                      | otherwise  = cur
 
 
-        -- | fixAbsBindScope removes any let bindings from this level, and
-        --  push it down into the binding itself. Note however that we must
-        -- generate recursive bindings here whenever a hole match uses a
-        -- recursive call, and generate the wrapper so that the type matches.
-        fixAbsBindScope :: HsBindLR GhcTc GhcTc -> TcM (HsBindLR GhcTc GhcTc)
-        fixAbsBindScope fb@AbsBinds{..} = do
-          hf_ev_binds <- liftIO getHFEvBinds
-          let mapEvBs f (EvBinds bs) = EvBinds $ f bs
-              mapEvBs _ tcevbs = tcevbs
-              absEvB = map (mapEvBs (removeCommonBinds hf_ev_binds)) abs_ev_binds
-              eToB :: ABExport GhcTc -> TcM EvBind
-              eToB ABE{..} = do
-                 tys <- mapM zonkTcTyVar abs_tvs
-                 vars <- mapM zonkEvVar abs_ev_vars
-                 wrp <- ($ evId abe_poly) <$>
-                     (initDsTc $ dsHsWrapper $ mkWpEvVarApps vars
-                                            <.> mkWpTyApps tys
-                                            <.> abe_wrap) -- Always WpHole so far
-                 return $ EvBind abe_mono (EvExpr wrp) True
-              evbFvs = unionVarSets $
-                          map ebFb $ bagToList $ evBindMapBinds hf_ev_binds
-                where ebFb (EvBind _ (EvExpr e) _) = exprFreeVars e
-              isRelExport :: ABExport GhcTc -> Bool
-              isRelExport ABE{..} = abe_mono `elemVarSet` evbFvs
-          -- We need to ensure that we are referring to the correct binders,
-          -- in case of recursive definitions. So we add lets to all the
-          -- evidence.
-          -- wrpdBinds <- return $ EvBinds emptyBag
-          wrpdBinds <- EvBinds . listToBag
-                      <$> mapM eToB (filter isRelExport abs_exports)
-          res <- mapBagM (pL fixBindScope) abs_binds
-          return $ fb{ abs_binds = res
-                     , abs_ev_binds = filter (not . isEmptyTcEvBinds ) $
-                                         wrpdBinds:absEvB}
-        -- | fixOutBinds maps over the nested local binds, but sets the flag to
-        -- recursive so that we can redefine any local functions with the right
-        -- wrapper in fixAbsBinds. It gets optimized away anyway, in case we
-        -- don't actually need the recusivity.
-        fixOutBinds :: HsLocalBindsLR GhcTc GhcTc -> TcM (HsLocalBindsLR GhcTc GhcTc)
-        fixOutBinds hv@(HsValBinds x (XValBindsLR (NValBinds nvbs sigs))) =
-          do nnvbs <- mapM fixNB nvbs
-             return (HsValBinds x (XValBindsLR (NValBinds nnvbs sigs)))
-             where fixNB (rf, b) = do
-                    nb <- mapBagM (pL fixBindScope) b
-                    -- We always set it to recursive, since we generate
-                    -- wrappers from ABExports. It gets optimized away anyway.
-                    return (rf, nb)
+    -- | fixAbsBindScope removes any let bindings from this level, and
+    --  push it down into the binding itself. Note however that we must
+    -- generate recursive bindings here whenever a hole match uses a
+    -- recursive call, and generate the wrapper so that the type matches.
+    fixAbsBindScope :: HsBindLR GhcTc GhcTc -> TcM (HsBindLR GhcTc GhcTc)
+    fixAbsBindScope fb@AbsBinds{..} = do
+      -- We update to get the hfbindings replaced with their equivalent zonked
+      -- w.r.t. the other bindings
+      mapM_ updateExistingHFBinds $ map (\(EvBinds bs) -> bs) abs_ev_binds
+      hf_ev_binds <- getHFEvBinds
+      let -- All the TcEvBinds are EvBinds after typechecking
+          absEvB = map (\(EvBinds bs) ->
+                         EvBinds $ removeCommonBinds hf_ev_binds bs) abs_ev_binds
+          eToB :: ABExport GhcTc -> TcM EvBind
+          eToB ABE{..} = do
+             tys <- mapM zonkTcTyVar abs_tvs
+             vars <- mapM zonkEvVar abs_ev_vars
+             wrp <- ($ evId abe_poly)
+                 <$> (initDsTc $ dsHsWrapper $ mkWpEvVarApps vars
+                                             <.> mkWpTyApps tys
+                                             <.> abe_wrap) -- Always WpHole AFAICT
+             return $ EvBind abe_mono (EvExpr wrp) True
+          evbFvs = unionVarSets $ map ebFb $ bagToList $ evBindMapBinds hf_ev_binds
+            where ebFb (EvBind _ (EvExpr e) _) = exprFreeVars e
+          isRelExport :: ABExport GhcTc -> Bool
+          isRelExport ABE{..} = abe_mono `elemVarSet` evbFvs
+      -- We need to ensure that we are referring to the correct binders, in case
+      -- of recursive definitions. So we add lets to all the evidence.
+      wrpdBinds <- EvBinds . listToBag <$> mapM eToB (filter isRelExport abs_exports)
 
-        -- The rest of these are just walking over HsBinds and their various
-        -- sub-expressions
-        fixBindScope :: HsBindLR GhcTc GhcTc -> TcM (HsBindLR GhcTc GhcTc)
-        fixBindScope fb@FunBind{..} = do
-          res <- fixMatchGroupScope fun_matches
-          return $ fb{fun_matches = res}
-        fixBindScope fb@VarBind{..} = do
-          res <- pL fixExprScope var_rhs
-          return $ fb{var_rhs = res}
-        fixBindScope fb@PatBind{..} = do
-          res <- fixGRHSs pat_rhs
-          return $ fb{pat_rhs = res}
-        fixBindScope fb@AbsBinds{..} = fixAbsBindScope fb
-        fixBindScope x = return x
-        fixMatchGroupScope m@MG{mg_alts=L l alts} =
-             do res <- mapM (pL fixAltScope) alts
-                return $ m{mg_alts = (L l res)}
-        fixAltScope m@Match{..} = do
-            do res <- fixGRHSs m_grhss
-               return m{m_grhss=res}
-        fixGRHSs g@GRHSs{..} = do
-            ngrhss <- mapM (pL fixGRHS) grhssGRHSs
-            nlb <- pL fixLocalBinds grhssLocalBinds
-            return g{grhssGRHSs=ngrhss, grhssLocalBinds=nlb}
-        fixGRHS g@(GRHS x gs b) = do
-            nb <- pL fixExprScope b
-            return (GRHS x gs nb)
-        fixLocalBinds (HsValBinds x (ValBinds x2 bs sigs)) =
-          do nbs <- mapBagM (pL fixBindScope) bs
-             return (HsValBinds x (ValBinds x2 nbs sigs))
-        fixLocalBinds hv@(HsValBinds _ (XValBindsLR (NValBinds _ _))) = fixOutBinds hv
-        fixLocalBinds x = return x
-        fixExprScope hv@(HsVar _ _) = fixVarExprScope hv
-        fixExprScope (HsLam x mg) = do
-            HsLam x <$> fixMatchGroupScope mg
-        fixExprScope (HsLamCase x mg) = do
-            HsLamCase x <$> fixMatchGroupScope mg
-        fixExprScope (HsApp x a1 a2) = do
-            pprOut "a1: " a1
-            pprOut "a2: " a2
-            na1 <- pL fixExprScope a1
-            na2 <- pL fixExprScope a2
-            return (HsApp x na1 na2)
-        fixExprScope (HsAppType x a1 wt) = do
-            na1 <- pL fixExprScope a1
-            return (HsAppType x na1 wt)
-        fixExprScope (OpApp x o1 o2 o3) = do
-            no1 <- pL fixExprScope o1
-            no2 <- pL fixExprScope o2
-            no3 <- pL fixExprScope o3
-            return (OpApp x no1 no2 no3)
-        fixExprScope (NegApp x e s) = do
-            ne <- pL fixExprScope e
-            return $ NegApp x ne s
-        fixExprScope (HsPar x e)  = do
-            ne <- pL fixExprScope e
-            return $ HsPar x ne
-        fixExprScope (ExplicitSum x c a e) = do
-            ne <- pL fixExprScope e
-            return $ ExplicitSum x c a ne
-        fixExprScope (HsCase x c mg) = do
-            nc <- pL fixExprScope c
-            nmg <- fixMatchGroupScope mg
-            return $ HsCase x nc nmg
-        fixExprScope (HsIf x m c t e) = do
-            nc <- pL fixExprScope c
-            nt <- pL fixExprScope t
-            ne <- pL fixExprScope e
-            return $ HsIf x m nc nt ne
-        fixExprScope (HsMultiIf x lgs) = do
-          nlgs <- mapM (pL fixGRHS) lgs
-          return $ HsMultiIf x nlgs
-        fixExprScope (HsLet x bs e) = do
-          ne <- pL fixExprScope e
-          nbs <- pL fixLocalBinds bs
-          return $ HsLet x nbs ne
-        fixExprScope (HsDo x ctxt (L l exprs)) = do
-          pprOut "hsd: " exprs
-          pprOut "hsdet: " $ text $ show $ map (toConstr . unLoc) exprs
+      res <- mapBagM (pL fixBindScope) abs_binds
+      return $ fb{ abs_binds = res
+                 , abs_ev_binds = filter (not . isEmptyTcEvBinds ) $ wrpdBinds:absEvB}
+    -- | fixOutBinds maps over the nested local binds, but sets the flag to
+    -- recursive so that we can redefine any local functions with the right
+    -- wrapper in fixAbsBinds. It gets optimized away anyway, in case we
+    -- don't actually need the recusivity.
+    fixOutBinds :: HsLocalBindsLR GhcTc GhcTc -> TcM (HsLocalBindsLR GhcTc GhcTc)
+    fixOutBinds hv@(HsValBinds x (XValBindsLR (NValBinds nvbs sigs))) =
+      do nnvbs <- mapM fixNB nvbs
+         return (HsValBinds x (XValBindsLR (NValBinds nnvbs sigs)))
+         where fixNB (rf, b) = do
+                nb <- mapBagM (pL fixBindScope) b
+                -- We always set it to recursive, since we generate
+                -- wrappers from ABExports. It gets optimized away anyway.
+                return (rf, nb)
+
+    -- The rest of these are just walking over HsBinds and their various
+    -- sub-expressions
+    fixBindScope :: HsBindLR GhcTc GhcTc -> TcM (HsBindLR GhcTc GhcTc)
+    fixBindScope fb@FunBind{..} = do
+      res <- fixMatchGroupScope fun_matches
+      return $ fb{fun_matches = res}
+    fixBindScope fb@VarBind{..} = do
+      res <- pL fixExprScope var_rhs
+      return $ fb{var_rhs = res}
+    fixBindScope fb@PatBind{..} = do
+      res <- fixGRHSs pat_rhs
+      return $ fb{pat_rhs = res}
+    fixBindScope fb@AbsBinds{..} = fixAbsBindScope fb
+    fixBindScope x = return x
+    fixMatchGroupScope m@MG{mg_alts=L l alts} =
+         do res <- mapM (pL fixAltScope) alts
+            return $ m{mg_alts = (L l res)}
+    fixAltScope m@Match{..} = do
+        do res <- fixGRHSs m_grhss
+           return m{m_grhss=res}
+    fixGRHSs g@GRHSs{..} = do
+        ngrhss <- mapM (pL fixGRHS) grhssGRHSs
+        nlb <- pL fixLocalBinds grhssLocalBinds
+        return g{grhssGRHSs=ngrhss, grhssLocalBinds=nlb}
+    fixGRHS g@(GRHS x gs b) = do
+        nb <- pL fixExprScope b
+        return (GRHS x gs nb)
+    fixLocalBinds (HsValBinds x (ValBinds x2 bs sigs)) =
+      do nbs <- mapBagM (pL fixBindScope) bs
+         return (HsValBinds x (ValBinds x2 nbs sigs))
+    fixLocalBinds hv@(HsValBinds _ (XValBindsLR (NValBinds _ _))) =
+         fixOutBinds hv
+    fixLocalBinds x = return x
+    fixExprScope hv@(HsVar _ _) = fixVarExprScope hv
+    fixExprScope (HsLam x mg) = do
+        HsLam x <$> fixMatchGroupScope mg
+    fixExprScope (HsLamCase x mg) = do
+        HsLamCase x <$> fixMatchGroupScope mg
+    fixExprScope (HsApp x a1 a2) = do
+        pprOut "a1: " a1
+        pprOut "a2: " a2
+        na1 <- pL fixExprScope a1
+        na2 <- pL fixExprScope a2
+        return (HsApp x na1 na2)
+    fixExprScope (HsAppType x a1 wt) = do
+        na1 <- pL fixExprScope a1
+        return (HsAppType x na1 wt)
+    fixExprScope (OpApp x o1 o2 o3) = do
+        no1 <- pL fixExprScope o1
+        no2 <- pL fixExprScope o2
+        no3 <- pL fixExprScope o3
+        return (OpApp x no1 no2 no3)
+    fixExprScope (NegApp x e s) = do
+        ne <- pL fixExprScope e
+        return $ NegApp x ne s
+    fixExprScope (HsPar x e)  = do
+        ne <- pL fixExprScope e
+        return $ HsPar x ne
+    fixExprScope (ExplicitSum x c a e) = do
+        ne <- pL fixExprScope e
+        return $ ExplicitSum x c a ne
+    fixExprScope (HsCase x c mg) = do
+        nc <- pL fixExprScope c
+        nmg <- fixMatchGroupScope mg
+        return $ HsCase x nc nmg
+    fixExprScope (HsIf x m c t e) = do
+        nc <- pL fixExprScope c
+        nt <- pL fixExprScope t
+        ne <- pL fixExprScope e
+        return $ HsIf x m nc nt ne
+    fixExprScope (HsMultiIf x lgs) = do
+      nlgs <- mapM (pL fixGRHS) lgs
+      return $ HsMultiIf x nlgs
+    fixExprScope (HsLet x bs e) = do
+      ne <- pL fixExprScope e
+      nbs <- pL fixLocalBinds bs
+      return $ HsLet x nbs ne
+    fixExprScope (HsDo x ctxt (L l exprs)) = do
+      pprOut "hsd: " exprs
+      pprOut "hsdet: " $ text $ show $ map (toConstr . unLoc) exprs
+      nexprs <- mapM (pL fixStmtScope) exprs
+      return $ HsDo x ctxt (L l nexprs)
+    fixExprScope (ExplicitList x se exprs) = do
+      nexprs <- mapM (pL fixExprScope) exprs
+      return $ ExplicitList x se nexprs
+    fixExprScope ru@(RecordUpd{..}) = do
+        ne <- pL fixExprScope rupd_expr
+        upf <- mapM (pL fixUpF) rupd_flds
+        return ru{rupd_expr=ne, rupd_flds=upf}
+    fixExprScope (ExprWithTySig x e tc) =
+      do ne <- pL fixExprScope e
+         pprOut "est: " (e, ne)
+         return $ ExprWithTySig x ne tc
+    fixExprScope x = return x
+    fixStmtScope (LastStmt x e b s) =
+      do ne <- pL fixExprScope e
+         pprOut "lste: " (e, ne)
+         return (LastStmt x ne b s)
+    fixStmtScope (BindStmt x p e s1 s2) =
+      do ne <- pL fixExprScope e
+         return (BindStmt x p ne s1 s2)
+    fixStmtScope (ApplicativeStmt x apls se) =
+      do napls <- mapM fixApl apls
+         return $ ApplicativeStmt x napls se
+      where fixApl (se, ApplicativeArgOne x p e b) = do
+              ne <- pL fixExprScope e
+              return (se, ApplicativeArgOne x p ne b)
+            fixApl (se, ApplicativeArgMany x st f b) = do
+              nf <- fixExprScope f
+              nst <- mapM (pL fixStmtScope) st
+              return $ (se, ApplicativeArgMany x nst nf b)
+    fixStmtScope (BodyStmt x e s1 s2) =
+      do ne <- pL fixExprScope e
+         pprOut "bs: " (e, ne)
+         return (BodyStmt x ne s1 s2)
+    fixStmtScope (LetStmt x bs) =
+      do nbs <- pL fixLocalBinds bs
+         return (LetStmt x nbs)
+    fixStmtScope (ParStmt x bls e se) =
+      do ne <- fixExprScope e
+         nbls <- mapM fixParStmtBlock bls
+         return (ParStmt x nbls ne se)
+      where
+        fixParStmtBlock (ParStmtBlock x exprs idps se) = do
           nexprs <- mapM (pL fixStmtScope) exprs
-          return $ HsDo x ctxt (L l nexprs)
-        fixExprScope (ExplicitList x se exprs) = do
-          nexprs <- mapM (pL fixExprScope) exprs
-          return $ ExplicitList x se nexprs
-        fixExprScope ru@(RecordUpd{..}) = do
-            ne <- pL fixExprScope rupd_expr
-            upf <- mapM (pL fixUpF) rupd_flds
-            return ru{rupd_expr=ne, rupd_flds=upf}
-        fixExprScope (ExprWithTySig x e tc) =
-          do ne <- pL fixExprScope e
-             pprOut "est: " (e, ne)
-             return $ ExprWithTySig x ne tc
-        fixExprScope x = return x
-        fixStmtScope (LastStmt x e b s) =
-          do ne <- pL fixExprScope e
-             pprOut "lste: " (e, ne)
-             return (LastStmt x ne b s)
-        fixStmtScope (BindStmt x p e s1 s2) =
-          do ne <- pL fixExprScope e
-             return (BindStmt x p ne s1 s2)
-        fixStmtScope (ApplicativeStmt x apls se) =
-          do napls <- mapM fixApl apls
-             return $ ApplicativeStmt x napls se
-          where fixApl (se, ApplicativeArgOne x p e b) = do
-                  ne <- pL fixExprScope e
-                  return (se, ApplicativeArgOne x p ne b)
-                fixApl (se, ApplicativeArgMany x st f b) = do
-                  nf <- fixExprScope f
-                  nst <- mapM (pL fixStmtScope) st
-                  return $ (se, ApplicativeArgMany x nst nf b)
-        fixStmtScope (BodyStmt x e s1 s2) =
-          do ne <- pL fixExprScope e
-             pprOut "bs: " (e, ne)
-             return (BodyStmt x ne s1 s2)
-        fixStmtScope (LetStmt x bs) =
-          do nbs <- pL fixLocalBinds bs
-             return (LetStmt x nbs)
-        fixStmtScope (ParStmt x bls e se) =
-          do ne <- fixExprScope e
-             nbls <- mapM fixParStmtBlock bls
-             return (ParStmt x nbls ne se)
-          where
-            fixParStmtBlock (ParStmtBlock x exprs idps se) = do
-              nexprs <- mapM (pL fixStmtScope) exprs
-              return $ ParStmtBlock x nexprs idps se
-        fixStmtScope r@RecStmt{..} = do
-          nst <- mapM (pL fixStmtScope) recS_stmts
-          return r{recS_stmts=nst}
-        fixStmtScope t@TransStmt{..} = do
-          nst <- mapM (pL fixStmtScope) trS_stmts
-          nu <- pL fixExprScope trS_using
-          nfm <- fixExprScope trS_fmap
-          nby <- case trS_by of
-                    Just e -> Just <$> (pL fixExprScope e)
-                    Nothing -> return Nothing
-          return t{trS_stmts=nst, trS_using=nu, trS_by=nby, trS_fmap=nfm}
-        fixStmtScope x = return x
-        -- [TODO]: we haven't implemented it for fixUpF, so we'll get an error
-        -- when synthesized holes are used in record updates.
-        fixUpF x = return x
+          return $ ParStmtBlock x nexprs idps se
+    fixStmtScope r@RecStmt{..} = do
+      nst <- mapM (pL fixStmtScope) recS_stmts
+      return r{recS_stmts=nst}
+    fixStmtScope t@TransStmt{..} = do
+      nst <- mapM (pL fixStmtScope) trS_stmts
+      nu <- pL fixExprScope trS_using
+      nfm <- fixExprScope trS_fmap
+      nby <- case trS_by of
+                Just e -> Just <$> (pL fixExprScope e)
+                Nothing -> return Nothing
+      return t{trS_stmts=nst, trS_using=nu, trS_by=nby, trS_fmap=nfm}
+    fixStmtScope x = return x
+    -- [TODO]: we haven't implemented it for fixUpF, so we'll get an error
+    -- when synthesized holes are used in record updates.
+    fixUpF x = return x
