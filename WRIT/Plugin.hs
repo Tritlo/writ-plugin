@@ -933,6 +933,7 @@ fixFitScope opts _ env@TcGblEnv{..} =
      -- We replace our binds with global binds, since they are already zonked.
      liftIO $ mapBagM_ addHFEvBind $ filterBag (isHFBind hf_ev_binds) tcg_ev_binds
      HFS zonked_ev_bind_map <- liftIO $ readIORef holeFitState
+     pprOut "zeb: " $ zonked_ev_bind_map
      nbs <- mapBagM (pL fixBindScope) tcg_binds
      let nonHfBinds = removeCommonBinds zonked_ev_bind_map tcg_ev_binds
      return $ env { tcg_binds = nbs, tcg_ev_binds = nonHfBinds}
@@ -941,7 +942,7 @@ fixFitScope opts _ env@TcGblEnv{..} =
         flags@Flags{..} = getFlags opts
         pprOut :: Outputable a => String -> a -> TcM ()
         pprOut msg p =
-          when f_debug $
+          -- when f_debug $
             liftIO $ putStrLn $ msg ++ (showSDocUnsafe $ ppr p)
         isHFBind :: EvBindMap -> EvBind -> Bool
         isHFBind evbs (EvBind lhs _ _) = isJust $ lookupEvBind evbs lhs
@@ -1096,6 +1097,8 @@ fixFitScope opts _ env@TcGblEnv{..} =
           nbs <- pL fixLocalBinds bs
           return $ HsLet x nbs ne
         fixExprScope (HsDo x ctxt (L l exprs)) = do
+          pprOut "hsd: " exprs
+          pprOut "hsdet: " $ text $ show $ map (toConstr . unLoc) exprs
           nexprs <- mapM (pL fixStmtScope) exprs
           return $ HsDo x ctxt (L l nexprs)
         fixExprScope (ExplicitList x se exprs) = do
@@ -1107,15 +1110,17 @@ fixFitScope opts _ env@TcGblEnv{..} =
             return ru{rupd_expr=ne, rupd_flds=upf}
         fixExprScope (ExprWithTySig x e tc) =
           do ne <- pL fixExprScope e
+             pprOut "est: " (e, ne)
              return $ ExprWithTySig x ne tc
         fixExprScope x = return x
-        fixStmtcope (LastStmt x e b s) =
+        fixStmtScope (LastStmt x e b s) =
           do ne <- pL fixExprScope e
+             pprOut "lste: " (e, ne)
              return (LastStmt x ne b s)
-        fixStmtcope (BindStmt x p e s1 s2) =
+        fixStmtScope (BindStmt x p e s1 s2) =
           do ne <- pL fixExprScope e
              return (BindStmt x p ne s1 s2)
-        fixStmtcope (ApplicativeStmt x apls se) =
+        fixStmtScope (ApplicativeStmt x apls se) =
           do napls <- mapM fixApl apls
              return $ ApplicativeStmt x napls se
           where fixApl (se, ApplicativeArgOne x p e b) = do
@@ -1125,13 +1130,14 @@ fixFitScope opts _ env@TcGblEnv{..} =
                   nf <- fixExprScope f
                   nst <- mapM (pL fixStmtScope) st
                   return $ (se, ApplicativeArgMany x nst nf b)
-        fixStmtcope (BodyStmt x e s1 s2) =
+        fixStmtScope (BodyStmt x e s1 s2) =
           do ne <- pL fixExprScope e
+             pprOut "bs: " (e, ne)
              return (BodyStmt x ne s1 s2)
-        fixStmtcope (LetStmt x bs) =
+        fixStmtScope (LetStmt x bs) =
           do nbs <- pL fixLocalBinds bs
              return (LetStmt x nbs)
-        fixStmtcope (ParStmt x bls e se) =
+        fixStmtScope (ParStmt x bls e se) =
           do ne <- fixExprScope e
              nbls <- mapM fixParStmtBlock bls
              return (ParStmt x nbls ne se)
