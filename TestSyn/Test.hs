@@ -3,7 +3,6 @@
                 -fplugin-opt=WRIT.Plugin:fill-holes
                 -fplugin-opt=WRIT.Plugin:fill-hole-depth=2
                 -dcore-lint
-                -ddump-ds
  #-}
 {-# LANGUAGE ScopedTypeVariables #-}
 module Main where

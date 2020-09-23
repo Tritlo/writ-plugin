@@ -942,7 +942,7 @@ fixFitScope opts _ env@TcGblEnv{..} =
         flags@Flags{..} = getFlags opts
         pprOut :: Outputable a => String -> a -> TcM ()
         pprOut msg p =
-          -- when f_debug $
+          when f_debug $
             liftIO $ putStrLn $ msg ++ (showSDocUnsafe $ ppr p)
         isHFBind :: EvBindMap -> EvBind -> Bool
         isHFBind evbs (EvBind lhs _ _) = isJust $ lookupEvBind evbs lhs
