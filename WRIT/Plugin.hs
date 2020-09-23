@@ -1057,6 +1057,8 @@ fixFitScope opts _ env@TcGblEnv{..} =
         fixExprScope (HsLamCase x mg) = do
             HsLamCase x <$> fixMatchGroupScope mg
         fixExprScope (HsApp x a1 a2) = do
+            pprOut "a1: " a1
+            pprOut "a2: " a2
             na1 <- pL fixExprScope a1
             na2 <- pL fixExprScope a2
             return (HsApp x na1 na2)
