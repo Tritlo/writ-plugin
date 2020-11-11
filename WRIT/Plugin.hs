@@ -704,12 +704,17 @@ solveHole flags@Flags{f_fill_holes=True, ..} other_cts ptc@PTC{..}
           cands <- getCandsInScope ct >>= flip (foldM (flip ($))) candidatePlugins
           fits <- mapM (\t -> fmap snd (holeFilter cands t)) ref_tys
           if (sum $ map length fits) == 0 then return []
-          else concat <$> mapM sortByGraph fits
+          else concat <$> mapM sortBySize fits
             >>= fmap (filter isCooked) . flip (foldM (flip ($))) fitPlugins
      -- We should pick a good "fit" here, taking the first after sorting by
      -- subsumption is something, but picking a good fit is a whole research
      -- field. We delegate that part to any installed hole fit plugins.
-     case fits of
+     -- We do however provide a simple heuristic for demostration purposes.
+     let isIdCand (IdHFCand _) = True
+         isIdCand _ = False
+         prioLocal = l ++ nl
+           where (l,nl) = partition (isIdCand . hfCand) fits
+     case prioLocal of
        (fit@HoleFit{..}:_) -> do
          (term, needed) <- unsafeTcPluginTcM $ candToCore ct fit
          -- We need to pull some shenanigans for prettier printing of the warning.
@@ -854,26 +859,6 @@ sortBySize :: [HoleFit] -> TcM [HoleFit]
 sortBySize = return . sortOn sizeOfFit
   where sizeOfFit :: HoleFit -> TypeSize
         sizeOfFit = sizeTypes . nubBy tcEqType .  hfWrap
-
-sortByGraph :: [HoleFit] -> TcM [HoleFit]
-sortByGraph fits = go [] fits
-  where tcSubsumesWCloning :: TcType -> TcType -> TcM Bool
-        tcSubsumesWCloning ht ty = withoutUnification fvs (tcSubsumes ht ty)
-          where fvs = tyCoFVsOfTypes [ht,ty]
-        hfIsLcl :: HoleFit -> Bool
-        hfIsLcl hf = case hfCand hf of
-                      IdHFCand _    -> True
-                      NameHFCand _  -> False
-                      GreHFCand gre -> gre_lcl gre
-        go :: [(HoleFit, [HoleFit])] -> [HoleFit] -> TcM [HoleFit]
-        go sofar [] = return $ uncurry (++) $ partition hfIsLcl topSorted
-          where toV (hf, adjs) = (hf, hfId hf, map hfId adjs)
-                (graph, fromV, _) = graphFromEdges $ map toV sofar
-                topSorted :: [HoleFit]
-                topSorted = map ((\(h,_,_) -> h) . fromV) $ topSort graph
-        go sofar (hf:hfs) =
-          do { adjs <- filterM (tcSubsumesWCloning (hfType hf) . hfType) fits
-             ; go ((hf, adjs):sofar) hfs }
 
 -- Copied from TcHoleErrors
 relevantCts :: Ct -> [Ct] -> [Ct]

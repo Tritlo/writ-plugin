@@ -2,126 +2,91 @@
                 -fplugin-opt=WRIT.Plugin:debug
                 -dcore-lint #-}
 -- Plugin:
+{-# LANGUAGE TypeOperators #-}
 {-# LANGUAGE DataKinds #-}
 {-# LANGUAGE FlexibleInstances #-}
 {-# LANGUAGE MultiParamTypeClasses #-}
 {-# LANGUAGE FlexibleContexts #-}
 {-# LANGUAGE TypeFamilies #-}
-{-# LANGUAGE PolyKinds #-}
-{-# LANGUAGE UndecidableInstances #-}
-{-# LANGUAGE TypeOperators #-}
-{-# LANGUAGE ScopedTypeVariables #-}
 module Main (main) where
-
 
 import WRIT.Configure
 
-data Label = L | H deriving (Show)
+data Label = Public | Private deriving (Show)
 
--- By giving the kind Label a Default instance, any ambiguous type variables
--- oft the kind Label will be defaulted to L
-type instance Default Label = L
+newtype Box (l :: Label) a = Box {unBox :: a} deriving (Show)
 
--- You can also give the kind the Discharge instance, which allows equality
--- between two of the types. You can either specify the types to match
--- directly (e.g. Discharge Label L H), or use variables. If you use the variables,
--- you can further compute to e.g. pretty print the labels.
-type instance Discharge (n :: Label) (m :: Label) =
-    Msg (Text "Forbidden flow from " :<>: LabelPpr (Max n m)
-         :<>: Text " to " :<>: LabelPpr (Min n m) :<>: Text "!")
+class Less (l :: Label) (l' :: Label)
 
-type family LabelPpr (k :: Label) where
-    LabelPpr L = Text "Public"
-    LabelPpr H = Text "Secret"
-    LabelPpr l = Text "Labeled " :<>: ShowType l
-
-
--- Giving the constraint (Less H L) an ignoreable instance simply means that
--- whenever a (Less H L) constraint can't be solved, that is ignored.
-type instance Ignore (Less n m) =
-    Msg (Text "Forbidden flow from " :<>: LabelPpr (Max n m)
-         :<>: Text " to " :<>: LabelPpr (Min n m) :<>: Text "!")
-
--- Promotable (F H _) will change any (a ~ F H b) into Coercible a (F H b), but
--- only when the label is H. Can also be written as (F _ _), if it should apply
--- to all labels.
-type instance Promote a (F H b) =
-     Msg (Text "Automatic promotion of unlabeled '"
-          :<>: ShowType a :<>: Text "' to a Secret '"
-          :<>: ShowType b :<>: Text "'!"
-          :$$: Text "Perhaps you intended to use 'box'?")
-type instance Promote a (F L b) =
-     (Msg (Text "Automatic promotion of unlabeled '"
-           :<>: ShowType a :<>: Text "' to a Public '"
-           :<>: ShowType a :<>: Text "'!"
-           :$$: Text "Perhaps you intended to use 'box'?"))
-
-newtype F (l :: Label) a = MkF {unF :: a} deriving (Show)
-
-box :: a -> F l a
-box = MkF
-
-class Less (l :: Label) (l' :: Label) where
-instance Less L H where
+instance Less Public Private where
 instance Less l l where
 
-newtype Age = MkAge Int deriving (Show)
-
-type family (Max (l :: Label) (l2 :: Label)) ::Label where
-    Max H _ = H
+type family (Max (l :: Label) (l2 :: Label)) :: Label where
+    Max Private _ = Private
     Max _ l = l
 
-type family Min (l :: Label) (l2 :: Label) where
-    Min L _ = L
-    Min _ l = l
+type instance Discharge (Public :: Label) (Private :: Label) =
+    Msg (Text "Forbidden flow from public to private"
+    :<>: Text " from allowing discharge!")
 
-f :: Less H a => F a b -> F H b
-f = MkF . unF
+type instance Promote a (Box l a) =
+     Msg (Text "Automatic promotion of unlabeled '"
+    :<>: ShowType a :<>: Text "' to a " :<>: ShowType l
+    :<>: Text " '" :<>: ShowType a :<>: Text "'!")
 
-fa :: Less L H => F a b -> F H b
-fa = MkF . unF
+type instance Promote (Box _ Int) Int =
+     Msg (Text "Automatic unboxing of boxed '"
+    :<>: ShowType Int :<>: Text "'!")
 
-f2 :: Max l1 l2 ~ H => F l1 a -> F l2 a
-f2 = MkF . unF
+type instance Default Label = Public
 
-f3 :: H ~ L => F l1 a -> F l2 a
-f3 = MkF . unF
-
-f4 :: Less H L => F a b -> F a b
-f4 = MkF . unF
-
-lor :: F L [Bool] -> F L Bool
-lor (x:xs) = if x then True else lor xs
-lor _ = True
+type instance Ignore (Less n m) =
+    Msg (Text "Forbidden flow from"
+    :<>: Text " ignoring Less!")
 
 main :: IO ()
-main = do print "hello!"
-          -- We can solve (Less H a) by defaulting a ~ L, and then solving
-          -- Less H L by ignoring it.
-          print (f (MkF True))
-          print (fa (MkF True))
-          -- By defaulting l1 and l2 to L, Max l1 l2 becomes L
-          -- we then solve this by equivaling L ~ H.
-          print (f2 (MkF False))
-          -- Here we're asked to solve H ~ L, which we can do by collapsing
-          -- Label.
-          print (f3 (MkF 0))
-          print (f4 (MkF 0))
-          -- We can promote automatically, ignoring the labels.
-          print (True :: F H Bool)
-          print (True :: F L Bool)
-          -- Not that we are turning this into a coercion, so that if
-          -- Int is coercible to Age, the promotion works.
-          print ((1 :: Int) :: F L Age)
-        --   If you have an unspecified type variable that can be defaulted, you
-        --   can also promote.
-          print ((1 :: Int) :: F l Age)
-          let labeledMaybe :: F l (Maybe Bool)
-              labeledMaybe = Just True
-          print labeledMaybe
-          -- Since we're automatically promoting, we can even pattern match on
-          -- labeled values.
-          case labeledMaybe of
-            Just True -> print "Was just true"
-            _ -> print "was something else"
+main =
+  do let -- Combine is our (naive) salting function
+         combine :: lo ~ Max la lb => Box la Int
+                 -> Box lb Int -> Box lo Int
+         combine (Box a) (Box b) = Box (a * b)
 
+         -- Here's a function that allows us to assert privacy
+         ensurePrivate_1 :: Less Private l => Box l a -> Box Private a
+         ensurePrivate_1 (Box a) = Box a
+
+         pass :: Box Public Int
+         pass = Box 2
+         salt :: Box Private Int
+         salt = Box 42
+
+         -- Hash 1 works, because we're not breaking any rules
+         hash_1 :: Box Private Int
+         hash_1 = combine pass salt
+
+        --  We got the label wrong, but it's OK, since we have Discharge
+         hash_2 :: Box Public Int
+         hash_2 = combine pass salt
+
+         -- If we don't want to write a function just yet, but we can
+         -- Promote to a box and then Promote again to unbox.
+         hash_3 :: Box Private Int
+         hash_3 = (pass :: Int) * (salt :: Int)
+
+         -- We don't even have to pick a label, since we can default.
+         hash_4 :: Box label Int
+         hash_4 = combine pass salt
+
+        -- Similarly, we can have discharge and default "lift" id to
+        -- be the ensurePrivate function:
+         ensurePrivate_2 :: Less Private l => Box l a -> Box Private a
+         ensurePrivate_2 = id
+
+         -- Here, id is turned from a -> a to Box l a -> Box l a during
+         -- typechecking. Then, the l is Defaulted to be Public, and
+         -- matched with a check of Public ~ Private, which is Discharged.
+
+     print $ ensurePrivate_1 hash_1
+     print $ ensurePrivate_1 hash_2
+     print $ ensurePrivate_2 hash_2
+     print "done!"

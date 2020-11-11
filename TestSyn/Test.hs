@@ -7,6 +7,7 @@
 {-# LANGUAGE ScopedTypeVariables #-}
 module Main where
 
+
 import WRIT.Configure
 import Data.Dynamic
 
@@ -16,29 +17,29 @@ ps a = _
         k  = _
 
 isOdd :: Integer -> Bool
-isOdd arg = not _even_arg
-  where myEven :: Integer -> Bool
-        myEven 0 = True
-        myEven n = _ (n-1)
-
+isOdd arg = not _
+  where isEven :: Integer -> Bool
+        isEven 0 = True
+        isEven n = _ (n-1)
 
 f :: b -> a -> b
 f = const
 g :: a -> b -> b
 g = _fli
 
-
 ps8 :: a -> b -> a
 ps8 a b = _
 
-
 ps5 :: a -> a
 ps5 a = _
+
+zero :: Integer
+zero = 0
 
 main :: IO ()
 main = do print LT
           print (g 2 3)
           print $ isOdd 5
           print $ (_fmap_succ :: [Int] -> [Int]) [1,2]
-          print $ (_foldl_enumTo :: [Int] -> [Int]) [1,2]
+          print $ (_foldl :: [Int] -> [Int]) [1,2]
           print (ps _)
