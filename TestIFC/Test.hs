@@ -24,7 +24,6 @@ import WRIT.Configure
 
 
 
-
 data Label = Public | Private deriving (Show)
 
 newtype Box (l :: Label) a = Box {unBox :: a} deriving (Show)
@@ -50,8 +49,6 @@ pass = Box 42
 hash_1 :: Box Private Int
 hash_1 = combine pass salt
 
-main1 :: IO ()
-main1 = print hash_1
 
 hash_2 :: Box Public Int
 hash_2 = combine pass salt
@@ -63,8 +60,6 @@ type instance Discharge (Public :: Label) (Private :: Label) =
     Msg (Text "Forbidden flow from public to private"
     :<>: Text " from allowing discharge!")
 --}
-
-
 
 
 
@@ -107,8 +102,6 @@ type instance Promote (Box _ Int) Int =
 
 
 
-
-
 hash_4 :: Box label Int
 hash_4 = combine pass salt
 
@@ -119,8 +112,6 @@ hash_4 = combine pass salt
 {--
 type instance Default Label = Public
 --}
-
-
 
 
 
@@ -163,12 +154,8 @@ type instance Ignore (Less n m) =
 
 
 
-
-
 ensurePrivate_2 :: Less Private l => Box l a -> Box Private a
 ensurePrivate_2 = id
-
-
 
 
 
