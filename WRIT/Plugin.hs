@@ -67,6 +67,12 @@ import GHC.Hs.Expr
 import GHC.Types.EvTerm (evCallStack)
 
 #else
+#if __GLASGOW_HASKELL__ >= 810
+import GHC.Hs.Extension
+import GHC.Hs.Binds
+import GHC.Hs.Expr
+#endif
+
 import GhcPlugins hiding (TcPlugin)
 import TcRnTypes
 import TcPluginM
@@ -118,7 +124,6 @@ import HsExpr
 #endif
 
 #if __GLASGOW_HASKELL__ < 810
-
 
 -- Backported from 8.10
 isEqPrimPred = isCoVarType
@@ -1137,9 +1142,15 @@ fixFitScope opts _ env@TcGblEnv{..} =
     fixStmtScope (ApplicativeStmt x apls se) =
       do napls <- mapM fixApl apls
          return $ ApplicativeStmt x napls se
+#if __GLASGOW_HASKELL__ >= 810
+      where fixApl (se, ApplicativeArgOne x p e b f) = do
+              ne <- pL fixExprScope e
+              return (se, ApplicativeArgOne x p ne b f)
+#else
       where fixApl (se, ApplicativeArgOne x p e b) = do
               ne <- pL fixExprScope e
               return (se, ApplicativeArgOne x p ne b)
+#endif
             fixApl (se, ApplicativeArgMany x st f b) = do
               nf <- fixExprScope f
               nst <- mapM (pL fixStmtScope) st
