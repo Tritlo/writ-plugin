@@ -1,9 +1,9 @@
 {-# OPTIONS_GHC -fplugin=WRIT.Plugin
                 -fplugin-opt=WRIT.Plugin:marshal-dynamics
                 -fplugin-opt=WRIT.Plugin:debug
+                -dcore-lint
                  #-}
 
-                --dcore-lint
 {-# LANGUAGE ScopedTypeVariables #-}
 {-# LANGUAGE RankNTypes #-}
 {-# LANGUAGE ConstraintKinds #-}
@@ -31,31 +31,25 @@ import qualified Data.Map as M
 -- xs = ["thanks", (), "i", False,
 --       "hate", (42 :: Int), "it"]
 
-data A = A deriving (Typeable, Show)
-data B = B deriving (Typeable, Show)
+data A = A deriving (Show)
+data B = B deriving (Show)
 
-class Typeable a => Foo a where
+class Foo a where
     goo :: a -> Int -> Int
     foo :: a -> Int
     -- Problematic
-    --foo :: Show a => a -> Int
+    -- loo :: Show a => a -> Int
     --goo :: Int -> a -> Int
 
 instance Foo A where
     foo _ = 10
     goo _ x = 10 + x
+    -- loo _ = 5
 
 instance Foo B where
     foo _ = 20
     goo _ x = 20 + x
-
--- dynFoo :: Dynamic -> Int
--- dynFoo d =
---     case dynTypeRep d of
---         x | x == someTypeRep (Proxy @A) -> (foo @A) $ fromDyn d undefined
---         x | x == someTypeRep (Proxy @B) -> (foo @B) $ fromDyn d undefined
---         x -> undefined
-
+    -- loo _ = 7
 
 type instance Dispatchable Foo = Msg (Text "Dispatching on Foo!")
 
@@ -64,10 +58,11 @@ main = do
     -- print xs
 
         --   print $ getValsOfTy @String xs
-          let s = [A,B] :: [Dynamic]
-          mapM_ (print . foo) s
-          mapM_ (print . flip goo 5) s
-        --   print (goo (toDyn A) 5)
-        --   print (goo (toDyn B) 6)
-        --   print (foo (toDyn A))
-        --   print (foo (toDyn B))
+        --   let s = [A,B] :: [Dynamic]
+        --   mapM_ (print . foo) s
+        --   mapM_ (print . flip goo 5) s
+        --   mapM_ (print . loo) s
+          print (goo (toDyn A) 5)
+          print (goo (toDyn B) 6)
+          print (foo (toDyn A))
+          print (foo (toDyn B))

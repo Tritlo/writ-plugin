@@ -506,7 +506,7 @@ solveDynDispatch ptc@PTC{..} ct
        class_name <- unsafeTcPluginTcM $ mkStringExprFS (occNameFS (getOccName cc_class))
        let dynamic = mkTyConApp dc_dynamic []
            sometyperep = mkTyConApp dc_sometyperep []
-           (_, ty) = splitForAllTys (varType fid)
+           (tvs, ty) = tcSplitForAllVarBndrs (varType fid)
            (res, preds) = splitPreds ty
            cvs = mkVarSet $ findCvars preds
            splWhile :: Type -> Type
@@ -519,8 +519,9 @@ solveDynDispatch ptc@PTC{..} ct
            res_ty = splWhile res
            res_ty_kind = tcTypeKind res_ty
            hasTypeable = mkTyConApp (classTyCon dc_typeable) [res_ty_kind, res_ty]
+           bound_preds = map (mkForAllTys tvs) preds
        check_typeable <- mkWanted (ctLoc ct) hasTypeable
-       dpt_els_n_checks <- mapM (mkDpEl cc_class fid res_ty) $ class_tys
+       dpt_els_n_checks <- mapM (mkDpEl cc_class fid res_ty bound_preds) $ class_tys
        let (dpt_els, dpt_checks) = unzip dpt_els_n_checks
            dpt_ty = mkBoxedTupleTy [sometyperep, dynamic]
            tev = ctEvId check_typeable
@@ -541,18 +542,18 @@ solveDynDispatch ptc@PTC{..} ct
        case tcSplitPredFunTy_maybe ty of
          Just (pt, t) -> (pt:) <$> splitPreds t
          _ -> (ty, [])
-     mkDpEl :: Class -> Id -> Type -> [Type] -> TcPluginM (CoreExpr, [Ct])
-     mkDpEl cc_class fid res_ty [dp_ty] =
+     mkDpEl :: Class -> Id -> Type -> [PredType] -> [Type] -> TcPluginM (CoreExpr, [Ct])
+     mkDpEl cc_class fid res_ty preds dts@[dp_ty] =
         do let fun_ty = mkTyConApp funTyCon [ tcTypeKind dp_ty , tcTypeKind res_ty
                                             , dp_ty, res_ty]
                hasTypeable ty = mkTyConApp (classTyCon dc_typeable) [tcTypeKind ty, ty]
            check_typeable <- mkWanted (ctLoc ct) (hasTypeable fun_ty)
            let class_pred = mkTyConApp (classTyCon cc_class) [dp_ty]
-           check_class <- mkWanted (ctLoc ct) class_pred
+           check_preds <- mapM (mkWanted (ctLoc ct) . flip piResultTys dts) preds
            let tev = ctEvId check_typeable
                dyn_app = mkCoreApps (Var dc_to_dyn) [Type fun_ty, Var tev]
-               cev = ctEvId check_class
-               fapp = mkCoreApps (Var fid) [Type dp_ty, Var cev]
+               pevs = map ctEvId check_preds
+               fapp = mkCoreApps (Var fid) $ [Type dp_ty] ++ (map Var pevs)
                dfapp = mkCoreApps dyn_app [fapp]
            check_typeable_dp <- mkWanted (ctLoc ct) $ hasTypeable dp_ty
            let dptev = ctEvId check_typeable_dp
@@ -562,11 +563,11 @@ solveDynDispatch ptc@PTC{..} ct
                str = dataConWrapId dc_sometyperep_dc
                strapp = mkCoreApps (Var str) [Type (tcTypeKind dp_ty)
                                             , Type dp_ty, trapp]
-               checks = [check_typeable, check_class, check_typeable_dp]
+               checks = [check_typeable, check_typeable_dp] ++ check_preds
                tup = mkCoreTup [strapp, dfapp]
            return (tup, checks)
       where
-     mkDpEl _ _ _ tys = pprPanic "Multi-param typeclasses not supported!" $ ppr tys
+     mkDpEl _ _ _ _ tys = pprPanic "Multi-param typeclasses not supported!" $ ppr tys
 
 
 
