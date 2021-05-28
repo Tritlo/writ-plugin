@@ -7,6 +7,7 @@ executable test_dyn
   default-language: Haskell2010
   build-depends:  base >= 4 && < 5,
                   ghc-prim >= 0.5,
+                  containers,
                   writ-plugin <= 1
   extensions: DataKinds,
               FlexibleInstances,

@@ -8,22 +8,26 @@
 {-# LANGUAGE MultiParamTypeClasses #-}
 {-# LANGUAGE FunctionalDependencies #-}
 {-# LANGUAGE ScopedTypeVariables #-}
+{-# LANGUAGE RankNTypes #-}
+{-# LANGUAGE AllowAmbiguousTypes #-}
 module WRIT.Configure (
         Default, Promote, Ignore, Discharge,
         Message(..), TypeError(..), ErrorMessage(..),
         -- Dynamic extension
-        castDyn
+        castDyn, dynDispatch, Dispatchable
 ) where
 
 import GHC.TypeLits (TypeError(..),ErrorMessage(..))
 import Data.Kind (Constraint, Type)
 import Data.Coerce (Coercible)
+import Data.Map
 
 -- castDyn
 import Data.Typeable
-import Type.Reflection
+import Type.Reflection (SomeTypeRep, someTypeRep)
 import Data.Dynamic
 import GHC.Stack
+import Data.Maybe (fromJust)
 
 -- We use the Message to reflect that these can also appear
 -- in warnings when using GRIT, and the same with Msg for TypeError.
@@ -74,3 +78,26 @@ castDyn arg = fromDyn arg err
                      ++ "' with actual dynamic type '" ++ actual  ++ "'")
         target = show (someTypeRep (Proxy :: Proxy a))
         actual = show (dynTypeRep arg)
+
+class Dispatchable (c :: Type -> Constraint) where
+
+dynDispatch :: forall a b . (Typeable a, Typeable b)
+            => Map (String, SomeTypeRep) Dynamic -- ^ Provided by the plugin
+            -> String                            -- ^ The name of the function
+            -> a -> b
+dynDispatch insts fun_name a =
+    case insts !? (fun_name, argt) of
+      Just f ->
+         let res = dynApp f $ toDyn a
+         in fromDyn res
+         (error $ "Incorrect types! Applying '"
+         ++ fun_name ++ " :: "
+         ++ show (dynTypeRep f)
+         ++ "' to '" ++ show argt
+         ++ " expecting '" ++ show targett
+         ++"' but got '" ++ show (dynTypeRep res) ++ "'")
+      _ -> error $ "Instance of '"
+                  ++ fun_name ++ " :: " ++ show argt ++ " -> " ++ show targett
+                  ++ "' not found in dispatch table!"
+ where argt = typeOf a
+       targett = someTypeRep (Proxy :: Proxy b)
