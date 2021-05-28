@@ -91,13 +91,14 @@ import CoAxiom
 import Unify
 import TcHsSyn
 
+import InstEnv
 
 -- Holefits
 import RdrName (globalRdrEnvElts)
 import TcRnMonad (keepAlive, getLclEnv, getGlobalRdrEnv, getGblEnv, newSysName)
 import TcHoleErrors
 import PrelInfo (knownKeyNames)
-import Data.Graph (graphFromEdges, topSort)
+import Data.Graph (graphFromEdges, topSort, scc)
 import Control.Monad (filterM, replicateM)
 import DsBinds (dsHsWrapper)
 import DsMonad (initDsTc)
@@ -337,7 +338,8 @@ gritPlugin opts = TcPlugin initialize solve stop
                    , (solveDischarge flags, "Discharging")
                    , (solveHole flags (wanted ++ derived), "Hole")
                    , (solveIgnore,    "Ignoring")
-                   , (solveDefault,   "Defaulting") ]
+                   , (solveDefault,   "Defaulting")
+                   , (solveDynDispatch,   "Checking Dynamic Dispatch") ]
            to_check = wanted ++ derived
        (_, (solved_wanteds, more_cts, logs)) <-
           foldM solveWFun (to_check, ([],[],Set.empty)) order
@@ -363,13 +365,17 @@ data DynCasts = DC { dc_typeable :: Class
                    , dc_dynamic :: TyCon
                    , dc_to_dyn :: Id
                    , dc_cast_dyn :: Id
-                   , dc_has_call_stack :: TyCon }
+                   , dc_has_call_stack :: TyCon
+                   , dc_dispatchable :: TyCon
+                   , dc_dyn_dispatch :: Id
+                   , dc_sometyperep :: TyCon }
 
 getPluginTyCons :: TcPluginM PluginTyCons
 getPluginTyCons =
    do fpmRes <- findImportedModule (mkModuleName "WRIT.Configure") Nothing
       dc_dynamic <- getTyCon dYNAMIC "Dynamic"
       dc_typeable <- getClass tYPEABLE_INTERNAL "Typeable"
+      dc_sometyperep <- getTyCon tYPEABLE_INTERNAL "SomeTypeRep"
       dc_to_dyn <- getId dYNAMIC "toDyn"
       dc_has_call_stack <- getTyCon gHC_STACK_TYPES "HasCallStack"
 
@@ -382,6 +388,8 @@ getPluginTyCons =
                 ptc_msg     <- getPromDataCon mod "Msg"
                 ptc_only_if <- getPromDataCon mod "OnlyIf"
                 dc_cast_dyn <- getId mod "castDyn"
+                dc_dispatchable <- getTyCon mod "Dispatchable"
+                dc_dyn_dispatch <- getId mod "dynDispatch"
                 let ptc_dc = DC {..}
                 return PTC{..}
          NoPackage uid -> pprPanic "Plugin module not found (no package)!" (ppr uid)
@@ -452,6 +460,97 @@ solveIgnore ptc@PTC{..} ct
               proof = evDataConApp classCon cc_tyargs []
           couldSolve (Just (proof, ct)) [msg_check] log
   | otherwise = wontSolve ct
+
+solveDynDispatch :: SolveFun
+solveDynDispatch ptc@PTC{..} ct
+  | CDictCan{..} <- ct = do
+   do case cc_tyargs of
+        [arg] | arg `tcEqType` dynamic -> do
+          let dispatchable = mkTyConApp dc_dispatchable
+                               [mkTyConTy $ classTyCon cc_class]
+          isDispatchable <- hasInst dispatchable
+          if not isDispatchable then wontSolve ct
+          else do
+             class_insts <- flip classInstances cc_class <$> getInstEnvs
+             let class_tys = map is_tys class_insts
+             -- We can only dispatch on singe argument classes
+             if not (all ((1 ==) . length) class_tys) then wontSolve ct
+             else do
+               scChecks <-
+                    mapM (mkWanted (ctLoc ct) .
+                          flip piResultTys cc_tyargs .
+                          mkSpecForAllTys (classTyVars cc_class)
+                          ) $ classSCTheta cc_class
+               let scEvIds = map (evId . ctEvId) scChecks
+               (msg_check, msg_var) <- checkMsg ptc ct dispatchable
+               args_n_checks <- mapM (methodToDynDispatch cc_class class_tys)
+                                       (classMethods cc_class)
+               let log = Set.singleton (Log msg_var (ctLoc ct))
+                   classCon = tyConSingleDataCon (classTyCon cc_class)
+                   (args, checks) = unzip args_n_checks
+                   proof = evDataConApp classCon cc_tyargs $ scEvIds ++ args
+               couldSolve (Just (proof, ct)) ([msg_check] ++ scChecks ++ concat checks) log
+        _ -> wontSolve ct
+  | otherwise = wontSolve ct
+
+  where
+     DC {..} = ptc_dc
+     dynamic = mkTyConApp dc_dynamic []
+     methodToDynDispatch :: Class -> [[Type]] -> Id -> TcPluginM (EvExpr, [Ct])
+     methodToDynDispatch cc_class class_tys fid = do
+       fun_name <- unsafeTcPluginTcM $ mkStringExprFS (occNameFS (getOccName fid))
+       class_name <- unsafeTcPluginTcM $ mkStringExprFS (occNameFS (getOccName cc_class))
+       let dynamic = mkTyConApp dc_dynamic []
+           sometyperep = mkTyConApp dc_sometyperep []
+           (_, ty) = splitForAllTys (varType fid)
+           (res, preds) = splitPreds ty
+           cvs = mkVarSet $ findCvars preds
+           splWhile :: Type -> Type
+           splWhile  t = case splitFunTy_maybe t of
+                           Just (nt,ntr) ->
+                              case getTyVar_maybe nt of
+                                 Just tv | tv `elemVarSet` cvs -> splWhile ntr
+                                 _ -> t
+                           _ -> t
+           res_ty = splWhile res
+           res_ty_kind = tcTypeKind res_ty
+           hasTypeable = mkTyConApp (classTyCon dc_typeable) [res_ty_kind, res_ty]
+       check_typeable <- mkWanted (ctLoc ct) hasTypeable
+       dpt_els_n_checks <- return [] -- mapM (mkDpEl fid) $ class_tys
+       let (dpt_els, dpt_checks) = unzip dpt_els_n_checks
+           dpt_ty = mkBoxedTupleTy [sometyperep, dynamic]
+           tev = ctEvId check_typeable
+           checks = check_typeable:(concat dpt_checks)
+           -- dynDispatch @ Int $dTypeable_a6qU insts (unpackCString# "foo"#)
+           app = mkCoreApps (Var dc_dyn_dispatch)
+                   [Type res_ty, evId tev, mkListExpr dpt_ty dpt_els, fun_name, class_name]
+       return $ (app, checks)
+       where
+        findCvars :: [Type] -> [TyVar]
+        findCvars [] = []
+        findCvars (t:ts) = case splitTyConApp_maybe t of
+                              Just (tc, tcs) | tc == classTyCon cc_class ->
+                                mapMaybe getTyVar_maybe tcs
+                              _ -> findCvars ts
+     splitPreds :: Type -> (Type, [PredType])
+     splitPreds ty =
+       case tcSplitPredFunTy_maybe ty of
+         Just (pt, t) -> (pt:) <$> splitPreds t
+         _ -> (ty, [])
+     mkDpEl :: Id -> [Type] -> TcPluginM (CoreExpr, [Ct])
+     mkDpEl fid at_ty = return (Var fid, [])
+      --   do f_checks <- mapM mkCheck ps_to_check
+      --      r_is_typeable <- mkCheck ret_is_typeable
+      --      let checks = r_is_typeable:f_checks
+      --      return (Var fid, checks)
+      -- where (ps_to_check, res) = splAll $ piResultTys (varType fid) at_ty
+      --       mkCheck = mkWanted (ctLoc ct) $
+      --                   mkApps (Var dc_to_dyn) [Type relTy, Var typeableDict]
+      --       ret_is_typeable =
+      --          mkTyConApp (classTyCon dc_typeable) [tcTypeKind res, res]
+
+
+
 
 
 -- | Solves Γ |- (a :: k) ~ (b :: k) if Γ |- Discharge a b ~ Msg m.

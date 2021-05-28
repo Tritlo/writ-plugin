@@ -20,7 +20,6 @@ module WRIT.Configure (
 import GHC.TypeLits (TypeError(..),ErrorMessage(..))
 import Data.Kind (Constraint, Type)
 import Data.Coerce (Coercible)
-import Data.Map
 
 -- castDyn
 import Data.Typeable
@@ -79,25 +78,29 @@ castDyn arg = fromDyn arg err
         target = show (someTypeRep (Proxy :: Proxy a))
         actual = show (dynTypeRep arg)
 
-class Dispatchable (c :: Type -> Constraint) where
+type family Dispatchable (c :: Type -> Constraint) :: Message
 
-dynDispatch :: forall a b . (Typeable a, Typeable b)
-            => Map (String, SomeTypeRep) Dynamic -- ^ Provided by the plugin
-            -> String                            -- ^ The name of the function
-            -> a -> b
-dynDispatch insts fun_name a =
-    case insts !? (fun_name, argt) of
+dynDispatch :: forall b . (Typeable b)
+            => [(SomeTypeRep, Dynamic)] -- ^ Provided by the plugin
+            -> String                   -- ^ The name of the function
+            -> String                   -- ^ The name of the class
+            -> Dynamic -> b
+dynDispatch insts fun_name class_name a =
+    case lookup argt insts of
       Just f ->
-         let res = dynApp f $ toDyn a
+         let res = dynApp f a
          in fromDyn res
-         (error $ "Incorrect types! Applying '"
+         (error $ "Type mismatch when applying '"
          ++ fun_name ++ " :: "
          ++ show (dynTypeRep f)
          ++ "' to '" ++ show argt
          ++ " expecting '" ++ show targett
-         ++"' but got '" ++ show (dynTypeRep res) ++ "'")
-      _ -> error $ "Instance of '"
+         ++"' but got '" ++ show (dynTypeRep res)
+         ++ "' in the dispatch table for '"
+         ++ class_name ++ "'!")
+      _ -> error $ "No instance of '" ++ class_name ++ " " ++ show argt ++ "'"
+                  ++ " found when dispatching for '"
                   ++ fun_name ++ " :: " ++ show argt ++ " -> " ++ show targett
-                  ++ "' not found in dispatch table!"
- where argt = typeOf a
+                  ++ "'."
+ where argt = dynTypeRep a
        targett = someTypeRep (Proxy :: Proxy b)
