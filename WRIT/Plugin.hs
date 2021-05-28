@@ -368,7 +368,9 @@ data DynCasts = DC { dc_typeable :: Class
                    , dc_has_call_stack :: TyCon
                    , dc_dispatchable :: TyCon
                    , dc_dyn_dispatch :: Id
-                   , dc_sometyperep :: TyCon }
+                   , dc_sometyperep :: TyCon
+                   , dc_sometyperep_dc :: DataCon
+                   , dc_typerep :: Id }
 
 getPluginTyCons :: TcPluginM PluginTyCons
 getPluginTyCons =
@@ -376,6 +378,8 @@ getPluginTyCons =
       dc_dynamic <- getTyCon dYNAMIC "Dynamic"
       dc_typeable <- getClass tYPEABLE_INTERNAL "Typeable"
       dc_sometyperep <- getTyCon tYPEABLE_INTERNAL "SomeTypeRep"
+      dc_sometyperep_dc <- getDataCon tYPEABLE_INTERNAL "SomeTypeRep"
+      dc_typerep <- getId tYPEABLE_INTERNAL "typeRep"
       dc_to_dyn <- getId dYNAMIC "toDyn"
       dc_has_call_stack <- getTyCon gHC_STACK_TYPES "HasCallStack"
 
@@ -396,8 +400,8 @@ getPluginTyCons =
          FoundMultiple ms -> pprPanic "Multiple plugin modules found!" (ppr ms)
          NotFound{..} -> pprPanic "Plugin module not found!" empty
   where getTyCon mod name = lookupOrig mod (mkTcOcc name) >>= tcLookupTyCon
-        getPromDataCon mod name = promoteDataCon <$>
-           (lookupOrig mod (mkDataOcc name) >>= tcLookupDataCon)
+        getDataCon mod name = lookupOrig mod (mkDataOcc name) >>= tcLookupDataCon
+        getPromDataCon mod name = promoteDataCon <$> (getDataCon mod name)
         getClass mod name = lookupOrig mod (mkClsOcc name) >>= tcLookupClass
         getId mod name = lookupOrig mod (mkVarOcc name) >>= tcLookupId
 
@@ -516,7 +520,7 @@ solveDynDispatch ptc@PTC{..} ct
            res_ty_kind = tcTypeKind res_ty
            hasTypeable = mkTyConApp (classTyCon dc_typeable) [res_ty_kind, res_ty]
        check_typeable <- mkWanted (ctLoc ct) hasTypeable
-       dpt_els_n_checks <- return [] -- mapM (mkDpEl fid) $ class_tys
+       dpt_els_n_checks <- mapM (mkDpEl cc_class fid res_ty) $ class_tys
        let (dpt_els, dpt_checks) = unzip dpt_els_n_checks
            dpt_ty = mkBoxedTupleTy [sometyperep, dynamic]
            tev = ctEvId check_typeable
@@ -537,18 +541,32 @@ solveDynDispatch ptc@PTC{..} ct
        case tcSplitPredFunTy_maybe ty of
          Just (pt, t) -> (pt:) <$> splitPreds t
          _ -> (ty, [])
-     mkDpEl :: Id -> [Type] -> TcPluginM (CoreExpr, [Ct])
-     mkDpEl fid at_ty = return (Var fid, [])
-      --   do f_checks <- mapM mkCheck ps_to_check
-      --      r_is_typeable <- mkCheck ret_is_typeable
-      --      let checks = r_is_typeable:f_checks
-      --      return (Var fid, checks)
-      -- where (ps_to_check, res) = splAll $ piResultTys (varType fid) at_ty
-      --       mkCheck = mkWanted (ctLoc ct) $
-      --                   mkApps (Var dc_to_dyn) [Type relTy, Var typeableDict]
-      --       ret_is_typeable =
-      --          mkTyConApp (classTyCon dc_typeable) [tcTypeKind res, res]
-
+     mkDpEl :: Class -> Id -> Type -> [Type] -> TcPluginM (CoreExpr, [Ct])
+     mkDpEl cc_class fid res_ty [dp_ty] =
+        do let fun_ty = mkTyConApp funTyCon [ tcTypeKind dp_ty , tcTypeKind res_ty
+                                            , dp_ty, res_ty]
+               hasTypeable ty = mkTyConApp (classTyCon dc_typeable) [tcTypeKind ty, ty]
+           check_typeable <- mkWanted (ctLoc ct) (hasTypeable fun_ty)
+           let class_pred = mkTyConApp (classTyCon cc_class) [dp_ty]
+           check_class <- mkWanted (ctLoc ct) class_pred
+           let tev = ctEvId check_typeable
+               dyn_app = mkCoreApps (Var dc_to_dyn) [Type fun_ty, Var tev]
+               cev = ctEvId check_class
+               fapp = mkCoreApps (Var fid) [Type dp_ty, Var cev]
+               dfapp = mkCoreApps dyn_app [fapp]
+           check_typeable_dp <- mkWanted (ctLoc ct) $ hasTypeable dp_ty
+           let dptev = ctEvId check_typeable_dp
+               trapp = mkCoreApps (Var dc_typerep) [ Type (tcTypeKind dp_ty)
+                                                  , Type dp_ty
+                                                  , Var dptev]
+               str = dataConWrapId dc_sometyperep_dc
+               strapp = mkCoreApps (Var str) [Type (tcTypeKind dp_ty)
+                                            , Type dp_ty, trapp]
+               checks = [check_typeable, check_class, check_typeable_dp]
+               tup = mkCoreTup [strapp, dfapp]
+           return (tup, checks)
+      where
+     mkDpEl _ _ _ tys = pprPanic "Multi-param typeclasses not supported!" $ ppr tys
 
 
 

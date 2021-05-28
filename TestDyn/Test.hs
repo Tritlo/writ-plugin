@@ -1,8 +1,9 @@
 {-# OPTIONS_GHC -fplugin=WRIT.Plugin
                 -fplugin-opt=WRIT.Plugin:marshal-dynamics
                 -fplugin-opt=WRIT.Plugin:debug
-                -dcore-lint
                  #-}
+
+                --dcore-lint
 {-# LANGUAGE ScopedTypeVariables #-}
 {-# LANGUAGE RankNTypes #-}
 {-# LANGUAGE ConstraintKinds #-}
@@ -55,22 +56,18 @@ instance Foo B where
 --         x | x == someTypeRep (Proxy @B) -> (foo @B) $ fromDyn d undefined
 --         x -> undefined
 
-insts  :: [(SomeTypeRep,Dynamic)]
-insts  = [(SomeTypeRep (typeRep :: TypeRep A), toDyn (foo @A))
-         ,(SomeTypeRep (typeRep :: TypeRep B), toDyn (foo @B))]
 
 type instance Dispatchable Foo = Msg (Text "Dispatching on Foo!")
-
--- instance Foo Dynamic where
---   foo = dynDispatch insts "foo"
---   goo x d = (dynDispatch insts "goo") d x
 
 main :: IO ()
 main = do
     -- print xs
 
         --   print $ getValsOfTy @String xs
-          --   mapM_ (print . foo) s
-        --   let s = [A,B] :: [Dynamic]
-          print (goo (toDyn A) 5)
-          print (goo (toDyn B) 6)
+          let s = [A,B] :: [Dynamic]
+          mapM_ (print . foo) s
+          mapM_ (print . flip goo 5) s
+        --   print (goo (toDyn A) 5)
+        --   print (goo (toDyn B) 6)
+        --   print (foo (toDyn A))
+        --   print (foo (toDyn B))
