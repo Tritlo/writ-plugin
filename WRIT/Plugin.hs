@@ -487,7 +487,9 @@ solveDynDispatch ptc@PTC{..} ct
             let args_n_checks = catMaybes mb_args_n_checks
             -- If there's a method we can't covert (e.g. due to it's type not
             -- being Typeable), the entire core we generate will be incorrect,
-            -- so we have to abort.
+            -- so we have to abort. Otherwise, we get a cryptic Typeable error.
+            -- Best would be if we customized said error to say something like
+            -- "Dynamic dispatch for Foo failed due to loo :: Show a => a -> Int"
             if length args_n_checks /= length mb_args_n_checks
             then wontSolve ct
             else let log = Set.empty
