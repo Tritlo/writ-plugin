@@ -14,7 +14,7 @@ module WRIT.Configure (
         Default, Promote, Ignore, Discharge,
         Message(..), TypeError(..), ErrorMessage(..),
         -- Dynamic extension
-        castDyn, dynDispatch, Dispatchable
+        castDyn, dynDispatch
 ) where
 
 import GHC.TypeLits (TypeError(..),ErrorMessage(..))
@@ -77,8 +77,6 @@ castDyn arg = fromDyn arg err
                      ++ "' with actual dynamic type '" ++ actual  ++ "'")
         target = show (someTypeRep (Proxy :: Proxy a))
         actual = show (dynTypeRep arg)
-
-type family Dispatchable (c :: Type -> Constraint) :: Message
 
 dynDispatch :: forall b . (Typeable b)
             => [(SomeTypeRep, Dynamic)] -- ^ Provided by the plugin

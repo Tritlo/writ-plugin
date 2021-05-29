@@ -1,8 +1,8 @@
 {-# OPTIONS_GHC -fplugin=WRIT.Plugin
                 -fplugin-opt=WRIT.Plugin:marshal-dynamics
                 -fplugin-opt=WRIT.Plugin:debug
+                -dcore-lint
                  #-}
-                --dcore-lint
 
 {-# LANGUAGE ScopedTypeVariables #-}
 {-# LANGUAGE RankNTypes #-}
@@ -39,7 +39,6 @@ class Foo a where
     foo :: a -> Int
     -- Problematic
     -- loo :: Show a => a -> Int
-    --goo :: Int -> a -> Int
 
 instance Foo A where
     foo _ = 10
@@ -51,18 +50,16 @@ instance Foo B where
     goo x _ = 20 + x
     -- loo _ = 7
 
-type instance Dispatchable Foo = Msg (Text "Dispatching on Foo!")
-
 main :: IO ()
 main = do
     -- print xs
 
         --   print $ getValsOfTy @String xs
-          let s = [A,B] :: [Dynamic]
-          mapM_ (print . foo) s
-          mapM_ (print . goo 5) s
+        --   let s = [A,B] :: [Dynamic]
+        --   mapM_ (print . foo) s
+        --   mapM_ (print . goo 5) s
         --   mapM_ (print . loo) s
-        --   print (foo (toDyn A))
-        --   print (foo (toDyn B))
-        --   print (goo 5 (toDyn A))
-        --   print (goo 6 (toDyn B))
+          print (foo (toDyn A))
+          print (foo (toDyn B))
+          print (goo 5 (toDyn A))
+          print (goo 6 (toDyn B))
