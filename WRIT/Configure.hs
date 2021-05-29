@@ -85,22 +85,19 @@ dynDispatch :: forall b . (Typeable b)
             -> String                   -- ^ The name of the function
             -> String                   -- ^ The name of the class
             -> Dynamic -> b
-dynDispatch insts fun_name class_name a =
+dynDispatch insts fun_name class_name dispatcher =
     case lookup argt insts of
       Just f ->
-         let res = dynApp f a
-         in fromDyn res
-         (error $ "Type mismatch when applying '"
-         ++ fun_name ++ " :: "
-         ++ show (dynTypeRep f)
-         ++ "' to '" ++ show argt
-         ++ " expecting '" ++ show targett
-         ++"' but got '" ++ show (dynTypeRep res)
-         ++ "' in the dispatch table for '"
+         fromDyn f
+         (error $ "Type mismatch when dispatching '"
+         ++ fun_name
+         ++ "' expecting '" ++ show targett
+         ++"' but got '" ++ show (dynTypeRep f)
+         ++ "' using dispatch table for '"
          ++ class_name ++ "'!")
       _ -> error $ "No instance of '" ++ class_name ++ " " ++ show argt ++ "'"
                   ++ " found when dispatching for '"
                   ++ fun_name ++ " :: " ++ show argt ++ " -> " ++ show targett
                   ++ "'."
- where argt = dynTypeRep a
+ where argt = dynTypeRep dispatcher
        targett = someTypeRep (Proxy :: Proxy b)

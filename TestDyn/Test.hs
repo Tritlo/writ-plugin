@@ -35,20 +35,20 @@ data A = A deriving (Show)
 data B = B deriving (Show)
 
 class Foo a where
-    goo :: a -> Int -> Int
     foo :: a -> Int
+    goo :: Int -> a -> Int
     -- Problematic
     -- loo :: Show a => a -> Int
     --goo :: Int -> a -> Int
 
 instance Foo A where
     foo _ = 10
-    goo _ x = 10 + x
+    goo x _ = 10 + x
     -- loo _ = 5
 
 instance Foo B where
     foo _ = 20
-    goo _ x = 20 + x
+    goo x _ = 20 + x
     -- loo _ = 7
 
 type instance Dispatchable Foo = Msg (Text "Dispatching on Foo!")
@@ -62,7 +62,7 @@ main = do
         --   mapM_ (print . foo) s
         --   mapM_ (print . flip goo 5) s
         --   mapM_ (print . loo) s
-          print (goo (toDyn A) 5)
-          print (goo (toDyn B) 6)
           print (foo (toDyn A))
           print (foo (toDyn B))
+          print (goo 5 (toDyn A))
+          print (goo 6 (toDyn B))

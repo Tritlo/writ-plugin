@@ -1,3 +1,4 @@
+
 -- Copyright (c) 2020 Matthías Páll Gissurarson
 {-# LANGUAGE LambdaCase #-}
 {-# LANGUAGE TypeFamilies #-}
@@ -502,13 +503,30 @@ solveDynDispatch ptc@PTC{..} ct
      dynamic = mkTyConApp dc_dynamic []
      methodToDynDispatch :: Class -> [[Type]] -> Id -> TcPluginM (EvExpr, [Ct])
      methodToDynDispatch cc_class class_tys fid = do
+       -- Names included for better error messages.
        fun_name <- unsafeTcPluginTcM $ mkStringExprFS (occNameFS (getOccName fid))
        class_name <- unsafeTcPluginTcM $ mkStringExprFS (occNameFS (getOccName cc_class))
        let dynamic = mkTyConApp dc_dynamic []
            sometyperep = mkTyConApp dc_sometyperep []
            (tvs, ty) = tcSplitForAllVarBndrs (varType fid)
            (res, preds) = splitPreds ty
-           cvs = mkVarSet $ findCvars preds
+           -- We want to know which type-vars correspond to the type we're
+           -- dispatching on, so we can remove them from the arguments.
+           findCvars :: [Type] -> [TyVar]
+           findCvars [] = []
+           findCvars (t:ts) = case splitTyConApp_maybe t of
+                                 Just (tc, tcs) | tc == classTyCon cc_class ->
+                                   mapMaybe getTyVar_maybe tcs
+                                 _ -> findCvars ts
+           cvars = findCvars preds
+           cvs = mkVarSet cvars
+           bound_preds = map (mkForAllTys tvs) preds
+           dpt_ty = mkBoxedTupleTy [sometyperep, dynamic]
+           headIsDispatchee :: Type -> Maybe Type
+           headIsDispatchee ty = do (h,rest) <- splitFunTy_maybe ty
+                                    tv <- getTyVar_maybe h
+                                    guard (tv `elemVarSet` cvs)
+                                    return rest
            splWhile :: Type -> Type
            splWhile  t = case splitFunTy_maybe t of
                            Just (nt,ntr) ->
@@ -516,27 +534,43 @@ solveDynDispatch ptc@PTC{..} ct
                                  Just tv | tv `elemVarSet` cvs -> splWhile ntr
                                  _ -> t
                            _ -> t
-           res_ty = splWhile res
-           res_ty_kind = tcTypeKind res_ty
-           hasTypeable = mkTyConApp (classTyCon dc_typeable) [res_ty_kind, res_ty]
-           bound_preds = map (mkForAllTys tvs) preds
-       check_typeable <- mkWanted (ctLoc ct) hasTypeable
-       dpt_els_n_checks <- mapM (mkDpEl cc_class fid res_ty bound_preds) $ class_tys
-       let (dpt_els, dpt_checks) = unzip dpt_els_n_checks
-           dpt_ty = mkBoxedTupleTy [sometyperep, dynamic]
-           tev = ctEvId check_typeable
-           checks = check_typeable:(concat dpt_checks)
-           -- dynDispatch @ Int $dTypeable_a6qU insts (unpackCString# "foo"#)
-           app = mkCoreApps (Var dc_dyn_dispatch)
-                   [Type res_ty, evId tev, mkListExpr dpt_ty dpt_els, fun_name, class_name]
-       return $ (app, checks)
+           fill_ty = piResultTys (mkForAllTys tvs res)
+           -- Plan: use mkCoreLam, so goo becomes
+           -- (\i d -> (dynDispatch [dpt] "goo" "Foo" d) i (castDyn d))
+           -- | finalize works when there is only one argument.
+           finalize (dp:lams) res_ty = do
+             let revl = reverse (dp:lams)
+                 lamrety =
+                   foldr (\a b -> mkTyConApp funTyCon [tcTypeKind a, tcTypeKind b, a, b]) res_ty
+                     $ map varType revl
+                 hasTypeable = mkTyConApp (classTyCon dc_typeable) [tcTypeKind lamrety, lamrety]
+             check_typeable <- mkWanted (ctLoc ct) hasTypeable
+             dpt_els_n_checks <- mapM (\ct -> mkDpEl cc_class fid (fill_ty ct) bound_preds ct) class_tys
+             let (dpt_els, dpt_checks) = unzip dpt_els_n_checks
+                 tev = ctEvId check_typeable
+                 checks = check_typeable:(concat dpt_checks)
+                 app = mkCoreApps (Var dc_dyn_dispatch)
+                         ([ Type lamrety, evId tev, mkListExpr dpt_ty dpt_els
+                         , fun_name, class_name, Var dp] ++ (map Var revl))
+                 lamApp = mkCoreLams revl app
+             return $ (lamApp, checks)
+           loop lams ty = do
+              case headIsDispatchee ty of
+                Just res -> do
+                  let (t,_) = splitFunTy ty
+                  bid <- unsafeTcPluginTcM $ mkSysLocalM (getOccFS fid) t
+                  finalize (bid:lams) ty
+                _ -> do case splitFunTy_maybe ty of
+                          Just (t,r) -> do
+                              bid <- unsafeTcPluginTcM $ mkSysLocalM (getOccFS fid) t
+                              loop (bid:lams) r
+                          _ ->
+                            -- TODO: what if there is no element of the dispatched type in the function type?
+                            finalize lams ty
+                            -- error "Unsupported dispatch!"
+
+       loop [] $ fill_ty (replicate (length $ head class_tys) dynamic)
        where
-        findCvars :: [Type] -> [TyVar]
-        findCvars [] = []
-        findCvars (t:ts) = case splitTyConApp_maybe t of
-                              Just (tc, tcs) | tc == classTyCon cc_class ->
-                                mapMaybe getTyVar_maybe tcs
-                              _ -> findCvars ts
      splitPreds :: Type -> (Type, [PredType])
      splitPreds ty =
        case tcSplitPredFunTy_maybe ty of
@@ -544,14 +578,12 @@ solveDynDispatch ptc@PTC{..} ct
          _ -> (ty, [])
      mkDpEl :: Class -> Id -> Type -> [PredType] -> [Type] -> TcPluginM (CoreExpr, [Ct])
      mkDpEl cc_class fid res_ty preds dts@[dp_ty] =
-        do let fun_ty = mkTyConApp funTyCon [ tcTypeKind dp_ty , tcTypeKind res_ty
-                                            , dp_ty, res_ty]
-               hasTypeable ty = mkTyConApp (classTyCon dc_typeable) [tcTypeKind ty, ty]
-           check_typeable <- mkWanted (ctLoc ct) (hasTypeable fun_ty)
+        do let hasTypeable ty = mkTyConApp (classTyCon dc_typeable) [tcTypeKind ty, ty]
+           check_typeable <- mkWanted (ctLoc ct) (hasTypeable res_ty)
            let class_pred = mkTyConApp (classTyCon cc_class) [dp_ty]
            check_preds <- mapM (mkWanted (ctLoc ct) . flip piResultTys dts) preds
            let tev = ctEvId check_typeable
-               dyn_app = mkCoreApps (Var dc_to_dyn) [Type fun_ty, Var tev]
+               dyn_app = mkCoreApps (Var dc_to_dyn) [Type res_ty, Var tev]
                pevs = map ctEvId check_preds
                fapp = mkCoreApps (Var fid) $ [Type dp_ty] ++ (map Var pevs)
                dfapp = mkCoreApps dyn_app [fapp]
