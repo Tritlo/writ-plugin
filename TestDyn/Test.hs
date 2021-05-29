@@ -1,8 +1,8 @@
 {-# OPTIONS_GHC -fplugin=WRIT.Plugin
                 -fplugin-opt=WRIT.Plugin:marshal-dynamics
                 -fplugin-opt=WRIT.Plugin:debug
-                -dcore-lint
                  #-}
+                --dcore-lint
 
 {-# LANGUAGE ScopedTypeVariables #-}
 {-# LANGUAGE RankNTypes #-}
@@ -35,8 +35,8 @@ data A = A deriving (Show)
 data B = B deriving (Show)
 
 class Foo a where
-    foo :: a -> Int
     goo :: Int -> a -> Int
+    foo :: a -> Int
     -- Problematic
     -- loo :: Show a => a -> Int
     --goo :: Int -> a -> Int
@@ -58,11 +58,11 @@ main = do
     -- print xs
 
         --   print $ getValsOfTy @String xs
-        --   let s = [A,B] :: [Dynamic]
-        --   mapM_ (print . foo) s
-        --   mapM_ (print . flip goo 5) s
+          let s = [A,B] :: [Dynamic]
+          mapM_ (print . foo) s
+          mapM_ (print . goo 5) s
         --   mapM_ (print . loo) s
-          print (foo (toDyn A))
-          print (foo (toDyn B))
-          print (goo 5 (toDyn A))
-          print (goo 6 (toDyn B))
+        --   print (foo (toDyn A))
+        --   print (foo (toDyn B))
+        --   print (goo 5 (toDyn A))
+        --   print (goo 6 (toDyn B))

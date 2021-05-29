@@ -545,13 +545,24 @@ solveDynDispatch ptc@PTC{..} ct
                      $ map varType revl
                  hasTypeable = mkTyConApp (classTyCon dc_typeable) [tcTypeKind lamrety, lamrety]
              check_typeable <- mkWanted (ctLoc ct) hasTypeable
-             dpt_els_n_checks <- mapM (\ct -> mkDpEl cc_class fid (fill_ty ct) bound_preds ct) class_tys
+             dpt_els_n_checks <- mapM (\ct -> mkDpEl cc_class fid (fill_ty ct) revl lamrety bound_preds ct) class_tys
              let (dpt_els, dpt_checks) = unzip dpt_els_n_checks
                  tev = ctEvId check_typeable
-                 checks = check_typeable:(concat dpt_checks)
-                 app = mkCoreApps (Var dc_dyn_dispatch)
+                 toDynLam :: CoreBndr -> TcPluginM (CoreExpr, [Ct])
+                 toDynLam bndr = do
+                  --  do let hasTypeable ty = mkTyConApp (classTyCon dc_typeable) [tcTypeKind ty, ty]
+                  --     check_typeable <- mkWanted (ctLoc ct) (hasTypeable (varType bndr))
+                  --     let tev = ctEvId check_typeable
+                  --         dyn_app = mkCoreApps (Var dc_to_dyn) [Type (varType bndr), Var tev]
+                      -- return (mkCoreApps dyn_app [Var bndr], [check_typeable])
+                     return (Var bndr, [])
+             (dynLams, dynLamChecks) <- unzip <$> mapM toDynLam (reverse lams)
+             let app = mkCoreApps (Var dc_dyn_dispatch)
                          ([ Type lamrety, evId tev, mkListExpr dpt_ty dpt_els
-                         , fun_name, class_name, Var dp] ++ (map Var revl))
+                         , fun_name, class_name, Var dp]
+                         ++ dynLams
+                         ++ [Var dp])
+                 checks = (check_typeable:(concat dpt_checks)) ++ (concat dynLamChecks)
                  lamApp = mkCoreLams revl app
              return $ (lamApp, checks)
            loop lams ty = do
@@ -576,17 +587,31 @@ solveDynDispatch ptc@PTC{..} ct
        case tcSplitPredFunTy_maybe ty of
          Just (pt, t) -> (pt:) <$> splitPreds t
          _ -> (ty, [])
-     mkDpEl :: Class -> Id -> Type -> [PredType] -> [Type] -> TcPluginM (CoreExpr, [Ct])
-     mkDpEl cc_class fid res_ty preds dts@[dp_ty] =
-        do let hasTypeable ty = mkTyConApp (classTyCon dc_typeable) [tcTypeKind ty, ty]
-           check_typeable <- mkWanted (ctLoc ct) (hasTypeable res_ty)
+     mkDpEl :: Class -> Id -> Type -> [CoreBndr] -> Type -> [PredType] -> [Type] -> TcPluginM (CoreExpr, [Ct])
+     mkDpEl cc_class fid res_ty revl lamrety preds dts@[dp_ty] =
+        do let matches [] _ = []
+               matches (b:bs) ty = let (t,r) = splitFunTy ty
+                                   in (varType b, t, b):(matches bs r)
+           let hasTypeable ty = mkTyConApp (classTyCon dc_typeable) [tcTypeKind ty, ty]
+           check_typeable <- mkWanted (ctLoc ct) (hasTypeable lamrety)
            let class_pred = mkTyConApp (classTyCon cc_class) [dp_ty]
            check_preds <- mapM (mkWanted (ctLoc ct) . flip piResultTys dts) preds
            let tev = ctEvId check_typeable
-               dyn_app = mkCoreApps (Var dc_to_dyn) [Type res_ty, Var tev]
+               dyn_app = mkCoreApps (Var dc_to_dyn) [Type lamrety, Var tev]
                pevs = map ctEvId check_preds
                fapp = mkCoreApps (Var fid) $ [Type dp_ty] ++ (map Var pevs)
-               dfapp = mkCoreApps dyn_app [fapp]
+               toFappArg :: (Type, Type, CoreBndr) -> TcPluginM (CoreExpr, [Ct])
+               toFappArg (t1,t2,b) | tcEqType t1 t2 = return (Var b, [])
+                                   |  otherwise  = do
+                  ct_tfp <- mkWanted (ctLoc ct) $ hasTypeable t2
+                  ccs <- mkWanted (ctLoc ct) $ mkTyConApp dc_has_call_stack []
+                  cs <- mkFromDynErrCallStack dc_cast_dyn ct $
+                                 ctEvEvId $ ctEvidence ccs
+                  let app = mkCoreApps (Var dc_cast_dyn) [Type t2, Var (ctEvId ct_tfp), cs, Var b]
+                  return (app,[ct_tfp, ccs])
+           (fappArgs, fappChecks) <- unzip <$> mapM toFappArg (matches revl res_ty)
+           let lamFapp = mkCoreLams revl $ mkCoreApps fapp fappArgs
+               dfapp = mkCoreApps dyn_app [lamFapp]
            check_typeable_dp <- mkWanted (ctLoc ct) $ hasTypeable dp_ty
            let dptev = ctEvId check_typeable_dp
                trapp = mkCoreApps (Var dc_typerep) [ Type (tcTypeKind dp_ty)
@@ -595,11 +620,11 @@ solveDynDispatch ptc@PTC{..} ct
                str = dataConWrapId dc_sometyperep_dc
                strapp = mkCoreApps (Var str) [Type (tcTypeKind dp_ty)
                                             , Type dp_ty, trapp]
-               checks = [check_typeable, check_typeable_dp] ++ check_preds
+               checks = [check_typeable, check_typeable_dp] ++ check_preds ++ (concat fappChecks)
                tup = mkCoreTup [strapp, dfapp]
            return (tup, checks)
       where
-     mkDpEl _ _ _ _ tys = pprPanic "Multi-param typeclasses not supported!" $ ppr tys
+     mkDpEl _ _ _ _ _ _ tys = pprPanic "Multi-param typeclasses not supported!" $ ppr tys
 
 
 
