@@ -38,7 +38,7 @@ class Foo a where
     goo :: Int -> a -> Int
     foo :: a -> Int
     -- Problematic
-    -- loo :: Show a => a -> Int
+    loo :: Show a => a -> Int
 
 instance Foo A where
     foo _ = 10
@@ -63,3 +63,4 @@ main = do
           print (foo (toDyn B))
           print (goo 5 (toDyn A))
           print (goo 6 (toDyn B))
+          print (loo (toDyn B))

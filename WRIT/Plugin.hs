@@ -482,13 +482,19 @@ solveDynDispatch ptc@PTC{..} ct
                               mkSpecForAllTys (classTyVars cc_class))
                               $ classSCTheta cc_class
             let scEvIds = map (evId . ctEvId) scChecks
-            args_n_checks <- mapM (methodToDynDispatch cc_class class_tys)
-                                    (classMethods cc_class)
-            let log = Set.empty
-                classCon = tyConSingleDataCon (classTyCon cc_class)
-                (args, checks) = unzip args_n_checks
-                proof = evDataConApp classCon cc_tyargs $ scEvIds ++ args
-            couldSolve (Just (proof, ct)) (scChecks ++ concat checks) log
+            mb_args_n_checks <- mapM (methodToDynDispatch cc_class class_tys)
+                                     (classMethods cc_class)
+            let args_n_checks = catMaybes mb_args_n_checks
+            -- If there's a method we can't covert (e.g. due to it's type not
+            -- being Typeable), the entire core we generate will be incorrect,
+            -- so we have to abort.
+            if length args_n_checks /= length mb_args_n_checks
+            then wontSolve ct
+            else let log = Set.empty
+                     classCon = tyConSingleDataCon (classTyCon cc_class)
+                     (args, checks) = unzip args_n_checks
+                     proof = evDataConApp classCon cc_tyargs $ scEvIds ++ args
+                 in couldSolve (Just (proof, ct)) (scChecks ++ concat checks) log
         _ -> wontSolve ct
   | otherwise = wontSolve ct
   where
@@ -496,7 +502,7 @@ solveDynDispatch ptc@PTC{..} ct
      dynamic = mkTyConApp dc_dynamic []
      sometyperep = mkTyConApp dc_sometyperep []
      -- | The workhorse. Creates the dictonary for C Dynamic on the fly.
-     methodToDynDispatch :: Class -> [[Type]] -> Id -> TcPluginM (EvExpr, [Ct])
+     methodToDynDispatch :: Class -> [[Type]] -> Id -> TcPluginM (Maybe (EvExpr, [Ct]))
      methodToDynDispatch cc_class class_tys fid = do
        -- Names included for better error messages.
        fun_name <- unsafeTcPluginTcM $ mkStringExprFS (occNameFS (getOccName fid))
@@ -506,20 +512,24 @@ solveDynDispatch ptc@PTC{..} ct
            bound_preds = map (mkForAllTys tvs) preds
            dpt_ty = mkBoxedTupleTy [sometyperep, dynamic]
            fill_ty = piResultTys (mkForAllTys tvs res)
+           enough_dynamics = replicate (length $ head class_tys) dynamic
+           dyn_ty = fill_ty enough_dynamics
+           -- Whole ty is the type minus the Foo a in the beginning
+           whole_ty = funResultTy $ piResultTys (varType fid) enough_dynamics
+           finalize _ _ | length preds >= 2 = return Nothing
            finalize (dp:lams) res_ty = do
              let revl = reverse (dp:lams)
                  mkFunApp a b = mkTyConApp funTyCon [tcTypeKind a,tcTypeKind b, a, b]
-                 lamrety = foldr mkFunApp res_ty $ map varType revl
-             (tev, check_typeable) <- checkTypeable lamrety
-             dpt_els_n_checks <- mapM (\ct -> mkDpEl fid (fill_ty ct) revl lamrety bound_preds ct) class_tys
+             (tev, check_typeable) <- checkTypeable whole_ty
+             dpt_els_n_checks <- mapM (\ct -> mkDpEl fid (fill_ty ct) revl dyn_ty bound_preds ct) class_tys
              let (dpt_els, dpt_checks) = unzip dpt_els_n_checks
                  app = mkCoreApps (Var dc_dyn_dispatch)
-                         ([ Type lamrety, evId tev, mkListExpr dpt_ty dpt_els
+                         ([ Type whole_ty, evId tev, mkListExpr dpt_ty dpt_els
                          , fun_name, class_name, Var dp]
                          ++ (map Var revl))
                  checks = (check_typeable:(concat dpt_checks))
                  lamApp = mkCoreLams revl app
-             return $ (lamApp, checks)
+             return $ Just (lamApp, checks)
            -- We figure out all the arguments to the functions first from the type.
            loop lams ty = do
              case splitFunTy_maybe ty of
@@ -527,8 +537,7 @@ solveDynDispatch ptc@PTC{..} ct
                   bid <- unsafeTcPluginTcM $ mkSysLocalM (getOccFS fid) t
                   loop (bid:lams) r
                 _ -> finalize lams ty
-
-       loop [] $ fill_ty (replicate (length $ head class_tys) dynamic)
+       loop [] dyn_ty
 
      -- | The workhorse that constructs the dispatch tables.
      mkDpEl :: Id -> Type -> [CoreBndr] -> Type -> [PredType] -> [Type] -> TcPluginM (CoreExpr, [Ct])
