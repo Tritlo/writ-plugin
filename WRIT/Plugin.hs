@@ -507,6 +507,38 @@ solveDynDispatch ptc@PTC{..} ct | CDictCan{..} <- ct
                          -> [[Type]]
                          -> Id
                          -> TcPluginM (EvExpr, [Ct])
+     -- For method 'loo :: Show a => Int -> a -> Int' in Foo with instances
+     -- Foo A and Foo B, this will generate the following (in Core):
+     -- Notation: {Foo A} = The dictionary for Foo A
+     -- (\ (k :: Show Dynamic) (l :: Int) (m :: Dynamic) ->
+     --   dynDispatch @(Show Dynamic => Int -> Dynamic -> Int)
+     --               {Typeable (Show Dynamic => Int -> Dynamic -> Int)}
+     --               -- ^ Only used too lookup in the table
+     --               [ (SomeTypeRep (typeRep :: TypeRep A), -- In core
+     --                  toDyn @(Show Dynamic => Int -> Dynamic -> Int)
+     --                        {Typeable (Show Dynamic => Int -> Dynamic -> Int)}
+     --                        (\ (k :: Show Dynamic) (l :: Int) (m :: Dynamic) ->
+     --                           loo @A {Foo A} {Show A} l (castDyn m)))
+     --               , (SomeTypeRep (typeRep :: TypeRep B), -- In core
+     --                  toDyn @(Show Dynamic => Int -> Dynamic -> Int)
+     --                        {Typeable (Show Dynamic => Int -> Dynamic -> Int)}
+     --                        (\ (k :: Show Dynamic) (l :: Int) (m :: Dynamic) ->
+     --                           loo @B {Foo B} {Show B} l (castDyn m)))]
+     --               -- ^ The dynamic dispatch table
+     --               (m :: Dynamic)
+     --               -- ^ The dynamic to dispatch on
+     --               (runtimeError @(Show Dynamic))
+     --               -- ^ Provided to please the type gods. This dictionary
+     --               --   is just thrown away by the function after dispatch.
+     --               (l :: Int)
+     --               -- ^ The first argument to the function, captured before
+     --               --   we had the dynamic we could use to know which type
+     --               --   to dispatch on.
+     --               (m :: Dynamic)
+     --               -- ^ The dynamic again. This will go to a castDyn to the
+     --               --   proper type before being evaluated at the function.
+     --)
+     -- And similar entries for each function in the Foo class.
      methodToDynDispatch cc_class class_tys fid = do
        -- Names included for better error messages.
        let fname = (occNameFS (getOccName fid))
@@ -526,11 +558,43 @@ solveDynDispatch ptc@PTC{..} ct | CDictCan{..} <- ct
            mkMissingDict t = mkRuntimeErrorApp rUNTIME_ERROR_ID t "Dynamic dictonary shouldn't be evaluated!"
            dynb_pred_dicts = map mkMissingDict unsatisfied_preds
        dyn_pred_vars <- unsafeTcPluginTcM $ mapM (mkSysLocalM (getOccFS fid)) unsatisfied_preds
-       let finalize (dp:lams) res_ty = do
+       let mkDpEl :: Type -> [CoreBndr]  -> [Type] -> TcPluginM (CoreExpr, [Ct])
+           mkDpEl res_ty revl dts@[dp_ty] =
+              do (tev, check_typeable) <- checkTypeable whole_ty
+                 (dptev, check_typeable_dp) <- checkTypeable dp_ty
+                 check_preds <- mapM (mkWanted (ctLoc ct) . flip piResultTys dts) bound_preds
+                 let dyn_app = mkCoreApps (Var dc_to_dyn) [Type whole_ty, Var tev]
+                     pevs = map ctEvId check_preds
+                     fapp = mkCoreApps (Var fid) $ [Type dp_ty] ++ (map Var pevs)
+                     toFappArg :: (Type, Type, CoreBndr) -> TcPluginM (CoreExpr, [Ct])
+                     toFappArg (t1,t2,b) | tcEqType t1 t2 = return (Var b, [])
+                                         |  otherwise  = do
+                         (tev, check_typeable) <- checkTypeable t2
+                         ccs <- mkWanted (ctLoc ct) $ mkTyConApp dc_has_call_stack []
+                         cs <- mkFromDynErrCallStack dc_cast_dyn ct $ ctEvEvId $ ctEvidence ccs
+                         let app = mkCoreApps (Var dc_cast_dyn)
+                                       [Type t2, Var tev, cs, Var b]
+                         return (app,[check_typeable, ccs])
+                     matches :: [CoreBndr] -> Type -> [(Type, Type, CoreBndr)]
+                     matches [] _ = []
+                     matches (b:bs) ty = (varType b, t, b):(matches bs r)
+                       where (t,r) = splitFunTy ty -- Safe, binders are as long or longer.
+                 (fappArgs, fappChecks) <- unzip <$> mapM toFappArg (matches revl res_ty)
+                 let dfapp = mkCoreApps dyn_app [mkCoreLams (dyn_pred_vars ++ revl) $ mkCoreApps fapp fappArgs]
+                     trapp = mkCoreApps (Var dc_typerep) [Type (tcTypeKind dp_ty), Type dp_ty, Var dptev]
+                     strapp = mkCoreApps
+                                 (Var (dataConWrapId dc_sometyperep_dc))
+                                 [Type (tcTypeKind dp_ty), Type dp_ty, trapp]
+                     checks = [check_typeable, check_typeable_dp] ++ check_preds ++ (concat fappChecks)
+                     tup = mkCoreTup [strapp, dfapp]
+                 return (tup, checks)
+           -- | The workhorse that constructs the dispatch tables.
+           mkDpEl _ _ tys = pprPanic "Multi-param typeclasses not supported!" $ ppr tys
+           finalize (dp:lams) res_ty = do
              let revl = reverse (dp:lams)
                  mkFunApp a b = mkTyConApp funTyCon [tcTypeKind a,tcTypeKind b, a, b]
              (tev, check_typeable) <- checkTypeable whole_ty
-             dpt_els_n_checks <- mapM (\ct -> mkDpEl fid whole_ty (fill_ty ct) revl dyn_ty bound_preds ct) class_tys
+             dpt_els_n_checks <- mapM (\ct -> mkDpEl (fill_ty ct) revl ct) class_tys
              -- To make the types match up, we must make a dictionary for each of the predicates,
              -- even though these will never be used.
              let (dpt_els, dpt_checks) = unzip dpt_els_n_checks
@@ -557,44 +621,6 @@ solveDynDispatch ptc@PTC{..} ct | CDictCan{..} <- ct
        -- Best would be if we customized said error to say something like
        -- "Dynamic dispatch for Foo failed due to loo :: Show a => a -> Int"
        return res
-
-     -- | The workhorse that constructs the dispatch tables.
-     mkDpEl :: Id -> Type -> Type -> [CoreBndr] -> Type -> [PredType]
-            -> [Type] -> TcPluginM (CoreExpr, [Ct])
-     mkDpEl fid whole_ty res_ty revl lamrety preds dts@[dp_ty] =
-        do (tev, check_typeable) <- checkTypeable lamrety
-           (dptev, check_typeable_dp) <- checkTypeable dp_ty
-           check_preds <- mapM (mkWanted (ctLoc ct) . flip piResultTys dts) preds
-           let dyn_app = mkCoreApps (Var dc_to_dyn) [Type lamrety, Var tev]
-               pevs = map ctEvId check_preds
-               fapp = mkCoreApps (Var fid) $ [Type dp_ty] ++ (map Var pevs)
-               toFappArg :: (Type, Type, CoreBndr) -> TcPluginM (CoreExpr, [Ct])
-               toFappArg (t1,t2,b) | tcEqType t1 t2 = return (Var b, [])
-                                   |  otherwise  = do
-                  (tev, check_typeable) <- checkTypeable t2
-                  ccs <- mkWanted (ctLoc ct) $ mkTyConApp dc_has_call_stack []
-                  cs <- mkFromDynErrCallStack dc_cast_dyn ct $ ctEvEvId $ ctEvidence ccs
-                  let app = mkCoreApps (Var dc_cast_dyn)
-                                [Type t2, Var tev, cs, Var b]
-                  return (app,[check_typeable, ccs])
-               matches :: [CoreBndr] -> Type -> [(Type, Type, CoreBndr)]
-               matches [] _ = []
-               matches (b:bs) ty = (varType b, t, b):(matches bs r)
-                 where (t,r) = splitFunTy ty -- Safe, binders are as long or longer.
-           (fappArgs, fappChecks) <- unzip <$> mapM toFappArg (matches revl res_ty)
-           let dfapp = mkCoreApps dyn_app [mkCoreLams revl $ mkCoreApps fapp fappArgs]
-               trapp = mkCoreApps (Var dc_typerep) [Type (tcTypeKind dp_ty), Type dp_ty, Var dptev]
-               strapp = mkCoreApps
-                           (Var (dataConWrapId dc_sometyperep_dc))
-                           [Type (tcTypeKind dp_ty), Type dp_ty, trapp]
-               checks = [check_typeable, check_typeable_dp] ++ check_preds ++ (concat fappChecks)
-               tup = mkCoreTup [strapp, dfapp]
-           return (tup, checks)
-     mkDpEl _ _ _ _ _ _ tys = pprPanic "Multi-param typeclasses not supported!" $ ppr tys
-
-     ------- Some Utils
-
-     -- | We want to know what the predicates are, since we need to check them.
 
      checkTypeable :: Type -> TcPluginM (EvId, Ct)
      checkTypeable ty = do
