@@ -39,6 +39,7 @@ class Foo a where
     foo :: a -> Int
     -- Problematic
     loo :: Show a => a -> Int
+    hoo :: Show a => a -> Int
 
 instance Foo A where
     foo _ = 10
