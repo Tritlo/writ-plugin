@@ -137,23 +137,12 @@ import Predicate
 #endif
 
 
-
 --------------------------------------------------------------------------------
 -- Exported
 
 plugin :: Plugin
 plugin = defaultPlugin { tcPlugin = Just . gritPlugin
                        , pluginRecompile = purePlugin
-                       , typeCheckResultAction = fixFitScope
-#if __GLASGOW_HASKELL__ >= 810
-                       , holeFitPlugin = \_ -> Just $
-                           fromPureHFPlugin (HoleFitPlugin {
-                                              candPlugin = \_ c -> return c,
-                                              fitPlugin = \h f ->
-                                                case (tyHCt h) >>= holeCtOcc of
-                                                  Just occ -> byCommons occ f
-                                                  _ -> return f })
-#endif
                        , installCoreToDos = coreDyn }
 
 --------------------------------------------------------------------------------
@@ -277,7 +266,6 @@ addWarning dflags log = tcPluginIO $ warn (ppr log)
 data Flags = Flags { f_debug            :: Bool
                    , f_quiet            :: Bool
                    , f_keep_errors      :: Bool
-                   , f_marshal_dynamics :: Bool
                    , f_fill_holes :: Bool
                    , f_fill_hole_depth :: Int
                     } deriving (Show)
@@ -286,7 +274,6 @@ getFlags :: [CommandLineOption] -> Flags
 getFlags opts = Flags { f_debug                 = "debug"            `elem` opts
                       , f_quiet                 = "quiet"            `elem` opts
                       , f_keep_errors           = "keep-errors"      `elem` opts
-                      , f_marshal_dynamics      = "marshal-dynamics" `elem` opts
                       , f_fill_holes            = "fill-holes" `elem` opts
                       , f_fill_hole_depth       = getFillHoleDepth opts
                       }
@@ -336,7 +323,7 @@ gritPlugin opts = TcPlugin initialize solve stop
                                       logs `Set.union` new_logs))
            order :: [(SolveFun, String)]
            order = [ (solveOnlyIf,    "OnlyIf")
-                   , (solveDischarge flags, "Discharging")
+                   , (solveDynamic, "Discharging")
                    , (solveIgnore,    "Ignoring")
                    , (solveDefault,   "Defaulting")
                    , (solveDynDispatch,   "Checking Dynamic Dispatch") ]
@@ -354,10 +341,8 @@ gritPlugin opts = TcPlugin initialize solve stop
 
 
 data PluginTyCons = PTC { ptc_default :: TyCon
-                        , ptc_promote :: TyCon
                         , ptc_only_if :: TyCon
                         , ptc_ignore  :: TyCon
-                        , ptc_discharge  :: TyCon
                         , ptc_msg :: TyCon
                         , ptc_dc :: DynCasts }
 
@@ -385,8 +370,6 @@ getPluginTyCons =
       case fpmRes of
          Found _ mod  ->
              do ptc_default <- getTyCon mod "Default"
-                ptc_discharge  <- getTyCon mod "Discharge"
-                ptc_promote <- getTyCon mod "Promote"
                 ptc_ignore  <- getTyCon mod "Ignore"
                 ptc_msg     <- getPromDataCon mod "Msg"
                 ptc_only_if <- getPromDataCon mod "OnlyIf"
@@ -462,7 +445,6 @@ solveIgnore ptc@PTC{..} ct
               proof = evDataConApp classCon cc_tyargs []
           couldSolve (Just (proof, ct)) [msg_check] log
   | otherwise = wontSolve ct
-
 
 -- | Solves Γ |- C Dynamic
 solveDynDispatch :: SolveFun
@@ -597,41 +579,6 @@ solveDynDispatch ptc@PTC{..} ct | CDictCan{..} <- ct =
         return (ctEvId c, c)
 
 
-
--- | Solves Γ |- (a :: k) ~ (b :: k) if Γ |- Discharge a b ~ Msg m.
--- Requires flags for marshal-dynamics
-solveDischarge :: Flags -> SolveFun
-solveDischarge Flags{..} ptc@PTC{..} ct
- | Just (k1,ty1,ty2) <- splitEquality (ctPred ct) = do
-    let discharge = mkTyConApp ptc_discharge [k1, ty1, ty2]
-    hasDischarge <- hasInst discharge
-    -- If k is Type, then we are doing a promotion, since the only valid
-    -- instance Discharge (a :: *) (b :: *) comes from WRIT.Configure,
-    -- where we have:
-    --
-    -- ```
-    --    type instance Discharge (a :: *) (b :: *) =
-    --       OnlyIf (Coercible a b) (Promote a b)
-    -- ```
-    --
-    -- But since we don't want to introduce non-determinisim in our rules (or
-    -- a separate rule for promote with some wonky condition on the kind), we
-    -- don't do this check here at the cost of slightly worse error messages.
-    let promote = mkTyConApp ptc_promote [ty1, ty2]
-        kIsType = tcIsLiftedTypeKind k1
-        DC {..} = ptc_dc
-        dynamic = mkTyConApp dc_dynamic []
-        isDyn ty = ty `tcEqType` dynamic
-    missingPromote <- (&&) kIsType . not <$> hasInst promote
-    if not hasDischarge || missingPromote
-    then if f_marshal_dynamics && kIsType && (isDyn ty1 || isDyn ty2)
-         then marshalDynamic k1 ty1 ty2 ptc ct else wontSolve ct
-    else do (msg_check, msg_var) <- checkMsg ptc ct discharge
-            let log = Set.singleton (Log msg_var (ctLoc ct))
-                proof = mkProof "grit-discharge" ty1 ty2
-            couldSolve (Just (proof, ct)) [msg_check] log
-  | otherwise = wontSolve ct
-
 -- Solve only if solves Γ |- OnlyIf c m_a ~ m_b, by checking  Γ |- c and
 -- Γ |-  m_a ~ m_b
 solveOnlyIf :: SolveFun
@@ -716,6 +663,19 @@ hasInst ty = case splitTyConApp_maybe ty of
 ----------------------------------------------------------------
 -- Marshalling to and from Dynamic
 ----------------------------------------------------------------
+
+-- | Solves Γ |- (a :: Type) ~ (b :: Type) if a ~ Dynamic or b ~ Dynamic
+solveDynamic :: SolveFun
+solveDynamic ptc@PTC{..} ct
+ | Just (k1,ty1,ty2) <- splitEquality (ctPred ct) = do
+    let DC {..} = ptc_dc
+        dynamic = mkTyConApp dc_dynamic []
+        kIsType = tcIsLiftedTypeKind k1
+        isDyn ty = ty `tcEqType` dynamic
+    if kIsType && (isDyn ty1 || isDyn ty2)
+    then marshalDynamic k1 ty1 ty2 ptc ct
+    else wontSolve ct
+  | otherwise = wontSolve ct
 
 data PluginState = PS { evMap :: Map FastString EvExpr , next :: Int }
 
@@ -829,491 +789,3 @@ coreDyn clo tds = do
         addDynToAlt (c, bs, expr) =
             do nexpr <- addDynToExpr expr
                return (c, bs, nexpr)
-
-
-----------------------------------------------------------------
--- Filling typed-holes
-----------------------------------------------------------------
-solveHole :: Flags -> [Ct] -> SolveFun
-solveHole flags@Flags{f_fill_holes=True, ..} other_cts ptc@PTC{..}
-  ct@CHoleCan{cc_ev=CtWanted{ctev_dest=EvVarDest evVar},
-              cc_hole=hole@(ExprHole (TrueExprHole occ))} =
-  do fits <- do
-      -- We don't need to wrap the implics here, because we are already there
-      -- in the environment
-#if __GLASGOW_HASKELL__ >= 810
-      hfPlugs <- unsafeTcPluginTcM $ tcg_hf_plugins <$> getGblEnv
-      let ty_h = TyH (listToBag relCts) [] (Just ct)
-          (candidatePlugins, fitPlugins) =
-             unzip $ map (\p-> ((candPlugin p) ty_h, (fitPlugin p) ty_h)) hfPlugs
-          holeFilter = flip (tcFilterHoleFits Nothing ty_h)
-#else
-      let (candidatePlugins, fitPlugins) = ([],[byCommons occ])
-          holeFilter = flip (tcFilterHoleFits Nothing [] relCts)
-#endif
-        -- We generate refinement-level-hole-fits as well, but we don't want to
-        -- loop indefinitely, so we only go down one level.
-      unsafeTcPluginTcM $
-       do ref_lvl <- refLevelHoleFits <$> getDynFlags
-          let ty_lvl = if length (split '$' $ occNameString occ) <= f_fill_hole_depth
-                       then fromMaybe 0 ref_lvl else 0
-
-          ref_tys <-  mapM (mkRefTy ct) [0..ty_lvl]
-          cands <- getCandsInScope ct >>= flip (foldM (flip ($))) candidatePlugins
-          fits <- mapM (\t -> fmap snd (holeFilter cands t)) ref_tys
-          if (sum $ map length fits) == 0 then return []
-          else concat <$> mapM sortBySize fits
-            >>= fmap (filter isCooked) . flip (foldM (flip ($))) fitPlugins
-     -- We should pick a good "fit" here, taking the first after sorting by
-     -- subsumption is something, but picking a good fit is a whole research
-     -- field. We delegate that part to any installed hole fit plugins.
-     -- We do however provide a simple heuristic for demostration purposes.
-     let isIdCand (IdHFCand _) = True
-         isIdCand _ = False
-         prioLocal = l ++ nl
-           where (l,nl) = partition (isIdCand . hfCand) fits
-     case prioLocal of
-       (fit@HoleFit{..}:_) -> do
-         (term, needed) <- unsafeTcPluginTcM $ candToCore ct fit
-         -- We need to pull some shenanigans for prettier printing of the warning.
-         implics <- unsafeTcPluginTcM $ (bagToList . wc_impl)
-                    <$> (tcl_lie <$> getLclEnv >>= (liftIO . readIORef))
-         let fvTy = fvVarSet $ tyCoFVsOfType (ctPred ct)
-             tys = map ctPred relCts ++ concatMap (map idType . ic_given) implics
-             anyMentioned = filter (not . isEmptyVarSet . intersectVarSet fvTy
-                                    . fvVarSet . tyCoFVsOfType ) tys
-             holeNames = mapMaybe (fmap ppr . holeCtOcc) needed
-             pp_ty = wrapType (ctPred ct) [] anyMentioned
-             log = Set.singleton $ LogSDoc (ctPred ct) (ctLoc ct) $ text "replacing"
-                 <+> quotes (ppr (holeOcc hole) <+> dcolon <+> ppr pp_ty)
-                 <+> text "with"
-                 <+> quotes (foldl (<+>) (ppr hfId) holeNames)
-         -- We have to ensure that we solve the relevantCts.
-         -- We need to make newWanteds here, otherwise we get a loop.
-         want_rel_cts <- mapM (mkWanted (ctLoc ct) . ctPred) relCts
-         -- Since we might be using local variables, we need to
-         -- aggresively inline the holefits. We do this by maintaining
-         -- our own evBindMap.
-         let cid = (ctEvEvId $ ctEvidence ct)
-         unsafeTcPluginTcM $ addHFEvBind $ EvBind cid term False
-         couldSolve (Just (term, ct)) (needed ++ want_rel_cts) log
-       _ -> wontSolve ct
-  where relCts = relevantCts ct other_cts
-solveHole _ _ _ ct = wontSolve ct
-
-
-
-mkRefTy :: Ct -> Int -> TcM (TcType, [TcTyVar])
-mkRefTy ct refLvl = (wrapWithVars &&& id) <$> newTyVars
-  where hole_ty = ctPred ct
-        hole_lvl = ctLocLevel $ ctEvLoc $ ctEvidence ct
-        newTyVars = replicateM refLvl $ setLvl <$>
-                        (newOpenTypeKind >>= TcM.newFlexiTyVar)
-        setLvl = flip setMetaTyVarTcLevel hole_lvl
-#if __GLASGOW_HASKELL__ >= 810
-        wrapWithVars vars = mkVisFunTys (map mkTyVarTy vars) hole_ty
-#else
-        wrapWithVars vars = mkFunTys (map mkTyVarTy vars) hole_ty
-#endif
-
-holeCtOcc :: Ct -> Maybe OccName
-holeCtOcc CHoleCan{cc_hole=hole@(ExprHole (TrueExprHole occ))} = Just occ
-holeCtOcc _ = Nothing
-
--- A simple "hole fit plugin", as an example to use when hole fit
--- plugins aren't available.
-byCommons :: OccName -> [HoleFit] -> TcM [HoleFit]
-byCommons name fits = return $
-  case occNameString name of
-    "_" -> fits
-           --pprPanic "fits" $ ppr fits
-    name -> [fst (maximumBy (compare `on` snd) $
-                  map (id &&& computeCommons name) fits)]
-
-  where commons :: Eq a => [a] -> [a] -> Int
-        commons s1a@(s1:s1s) s2a@(s2:s2s)
-          | s1 == s2 = 1 + commons s1s s2s
-          | otherwise = max (commons s1s s2a) (commons s1a s2s)
-        commons _ _ = 0
-        computeCommons :: String -> HoleFit -> Int
-        computeCommons name = commons name
-                                . occNameString . occName . hfId
-
--- We don't want any raw hole fits, since we need the actual ids.
-isCooked :: HoleFit -> Bool
-isCooked HoleFit{..} = True
-#if __GLASGOW_HASKELL__ >= 810
-isCooked _ = False
-#endif
-
-candToCore :: Ct -> HoleFit -> TcM (EvTerm, [Ct])
-candToCore ct fit@HoleFit{..}  = do
-    -- We know it's going to be true, since it came from tcFilterHoleFits. We
-    -- also don't have to worry about unification, since we're explicitly using
-    -- THIS fit.
-    (ty, vars) <- mkRefTy ct (length hfMatches)
-#if __GLASGOW_HASKELL__ < 810
-    ((True, wrp)) <- tcCheckHoleFit emptyBag [] ty hfType
-#else
-    let ty_h = TyH emptyBag [] (Just ct)
-    ((True, wrp)) <- tcCheckHoleFit ty_h ty hfType
-#endif
-    new_holes <- mapM (newHole ct) (zip hfMatches [0..])
-    let dicts = map (evId . ctEvEvId . ctEvidence) new_holes
-    core <- flip mkApps dicts . ($ (evId hfId)) <$> (initDsTc $ dsHsWrapper wrp)
-    let evVars = nonDetEltsUniqSet $ evVarsOfTerm (EvExpr core)
-    neededEv <- mapM evToCt evVars
-    return (EvExpr core, neededEv ++ new_holes)
-  where evToCt :: EvVar -> TcM Ct
-        evToCt var = do
-          ctev_dest <-
-           if isCoVar xvar
-           then HoleDest . CoercionHole xvar <$> (liftIO $ newIORef Nothing)
-           else return $ EvVarDest xvar
-          return $ CNonCanonical (CtWanted{..})
-          where xvar = var
-                ctev_loc = ctLoc ct
-                ctev_pred = varType xvar
-                ctev_nosh = WDeriv
-
-
-newHole :: Ct -> (PredType, Int) -> TcM Ct
-newHole ct (hole_ty, n) = do
-     let Just holeOcc = holeCtOcc ct
-     name <- newSysName $ mkVarOcc (occNameString holeOcc ++ "$" ++ show n)
-     let hole = ExprHole (TrueExprHole $ occName name)
-         var = mkLocalIdOrCoVar name hole_ty
-     flip setCtLoc (ctLoc ct) <$> TcM.newHoleCt hole var hole_ty
-
--- From TcHoleErrors (it's not exported)
-getCandsInScope :: Ct -> TcM [HoleFitCandidate]
-getCandsInScope ct = do
-  rdr_env <- getGlobalRdrEnv
-  lcl_binds <- getLocalBindings ct
-  let (lcl, gbl) = partition gre_lcl (globalRdrEnvElts rdr_env)
-      locals = removeBindingShadowing $ map IdHFCand lcl_binds
-                                        ++ map GreHFCand lcl
-      builtIns = filter isBuiltInSyntax knownKeyNames
-      globals = map GreHFCand gbl
-      syntax = map NameHFCand builtIns
-  return $ locals ++ syntax ++ globals
-  where getLocalBindings :: Ct -> TcM [Id]
-        getLocalBindings ct =
-          go [] (removeBindingShadowing $ tcl_bndrs lcl_env)
-          where loc     = ctEvLoc (ctEvidence ct)
-                lcl_env = ctLocEnv loc
-                go :: [Id] -> [TcBinder] -> TcM [Id]
-                go sofar [] = return (reverse sofar)
-                go sofar (tc_bndr : tc_bndrs) =
-                    case tc_bndr of
-                      TcIdBndr id _ -> keep_it id
-                      _ -> discard_it
-                  where discard_it = go sofar tc_bndrs
-                        keep_it id = go (id:sofar) tc_bndrs
-
--- Also from TcHoleErrors
-
-sortBySize :: [HoleFit] -> TcM [HoleFit]
-sortBySize = return . sortOn sizeOfFit
-  where sizeOfFit :: HoleFit -> TypeSize
-        sizeOfFit = sizeTypes . nubBy tcEqType .  hfWrap
-
--- Copied from TcHoleErrors
-relevantCts :: Ct -> [Ct] -> [Ct]
-relevantCts hole_ct cts = if isEmptyVarSet (fvVarSet hole_fvs) then []
-              else filter isRelevant cts
-  where ctFreeVarSet :: Ct -> VarSet
-        hole_fvs = tyCoFVsOfType (ctPred hole_ct)
-        ctFreeVarSet = fvVarSet . tyCoFVsOfType . ctPred
-        hole_fv_set = fvVarSet hole_fvs
-        anyFVMentioned :: Ct -> Bool
-        anyFVMentioned ct = not $ isEmptyVarSet $
-                              ctFreeVarSet ct `intersectVarSet` hole_fv_set
-        -- We filter out those constraints that have no variables (since
-        -- they won't be solved by finding a type for the type variable
-        -- representing the hole) and also other holes, since we're not
-        -- trying to find hole fits for many holes at once.
-        isRelevant ct = not (isEmptyVarSet (ctFreeVarSet ct))
-                        && anyFVMentioned ct
-                        && not (isHoleCt ct)
-
--- We need yet another global IORef to keep track of the variables that we
--- generated. This could be included in the PluginState variable, but I felt it
--- was clearer to keep them separated. After the TcPlugin has run, it is only
--- updated at the top-level of the typecheckresult action, and henceforth only
--- read.
-newtype HoleFitState = HFS { evBinds :: EvBindMap}
-
--- Global IORef Hack used to pass information between phases, as recommended at HIW.
-holeFitState :: IORef HoleFitState
-{-# NOINLINE  holeFitState#-}
-holeFitState = unsafePerformIO (newIORef (coerce emptyEvBindMap))
-
-addHFEvBind :: EvBind -> TcM ()
-addHFEvBind bind =
-   liftIO $ modifyIORef holeFitState (coerce $ flip extendEvBinds bind)
-
-lookupHFEvBind :: EvVar -> TcM (Maybe EvBind)
-lookupHFEvBind var =
-  liftIO $ coerce (flip lookupEvBind var) <$> readIORef holeFitState
-
-getHFEvBinds :: TcM EvBindMap
-getHFEvBinds = liftIO $ coerce <$> readIORef holeFitState
-
-setHFEvBinds :: EvBindMap -> TcM ()
-setHFEvBinds = liftIO . coerce (writeIORef holeFitState)
-
-updateExistingHFBinds :: Bag EvBind -> TcM ()
-updateExistingHFBinds =
-  liftIO . modifyIORef holeFitState . coerce (flip updateExistingBinds)
-
-updateExistingBinds :: EvBindMap -> Bag EvBind -> EvBindMap
-updateExistingBinds evbMap =
-  foldl extendEvBinds evbMap . bagToList . filterBag (isPresentBind evbMap)
-
-isPresentBind :: EvBindMap -> EvBind -> Bool
-isPresentBind evbs (EvBind lhs _ _) = isJust $ lookupEvBind evbs lhs
-
--- | We have to aggressively inline hole fits, since they depend on the scope of
--- the hole, which the typechecker plugin interface does not take into account.
--- In this function, we essentially walk over the typechecked AST, and push any
--- abstract let bindings (generated during typecheck) deeper, so that they can
--- pick up local variables.
--- The only intersting parts here are
---     fixExprScope hv@(HsVar x (L l v)) = do
--- and
---     fixBindScope fb@AbsBinds{..} = do
--- the rest is just mapping over sub-expressions.
-fixFitScope :: [CommandLineOption] -> ModSummary -> TcGblEnv -> TcM TcGblEnv
-fixFitScope opts _ env@TcGblEnv{..} =
-  do -- We replace our binds with global binds, since they are already zonked
-     -- wrt to the evidence bindings.
-     updateExistingHFBinds tcg_ev_binds
-     hf_ev_binds <- getHFEvBinds
-     nbs <- mapBagM (pL fixBindScope) tcg_binds
-     return $ env { tcg_binds = nbs
-                  , tcg_ev_binds = removeCommonBinds hf_ev_binds tcg_ev_binds}
-  where
-    pL :: (a -> TcM a) -> Located a -> TcM (Located a)
-    pL act (L l a) = (L l) <$> (act a)
-    flags@Flags{..} = getFlags opts
-    pprOut :: Outputable a => String -> a -> TcM ()
-    pprOut msg p = when f_debug $
-                    liftIO $ putStrLn $ msg ++ (showSDocUnsafe $ ppr p)
-    removeCommonBinds :: EvBindMap -> Bag EvBind -> Bag EvBind
-    removeCommonBinds evbs = filterBag (not . isPresentBind evbs)
-
-    -- | fixVarExprScope is where we take the actual varibale and replace
-    -- it with it's hole fit definition, thus ensuring that any local
-    -- arguments, types and dictionaries that the hole-fit uses is in scope.
-    fixVarExprScope :: HsExpr GhcTc -> TcM (HsExpr GhcTc)
-    fixVarExprScope hv@(HsVar x (L l v)) =
-        (lookupHFEvBind v) >>= \case
-          Just eb -> do evbs <- getHFEvBinds
-                        return $ HsWrap x (WpLet (EvBinds $ allRel evbs eb)) hv
-          _ -> return hv
-      where -- | Since hole expressions might mention other hole expressions,
-            -- we need to find the transitive closure of expressions here,
-            -- meaning that we include all bindings we know off, and any
-            -- bindings mentioned in those bindings etc.
-            allRel :: EvBindMap -> EvBind -> Bag EvBind
-            allRel evbs (EvBind lhs _ _ ) =
-                listToBag $ mapMaybe (lookupEvBind evbs) $
-                  dVarSetElems $ transCloDVarSet free (unitDVarSet lhs)
-              where free :: DVarSet -> DVarSet
-                    free = foldDVarSet add emptyDVarSet
-                    add :: Var -> DVarSet -> DVarSet
-                    add v cur
-                      | Just (EvBind{eb_rhs=EvExpr exp}) <- lookupEvBind evbs v
-                      = exprFreeIdsDSet exp `unionDVarSet` cur
-                      | otherwise = cur
-
-    -- | fixAbsBindScope removes any let bindings from this level, and
-    --  push it down into the binding itself. Note however that we must
-    -- generate recursive bindings here whenever a hole match uses a
-    -- recursive call, and generate the wrapper so that the type matches.
-    fixAbsBindScope :: HsBindLR GhcTc GhcTc -> TcM (HsBindLR GhcTc GhcTc)
-    fixAbsBindScope fb@AbsBinds{..} = do
-      -- We update to get the hfbindings replaced with their equivalent zonked
-      -- w.r.t. the other bindings
-      mapM_ updateExistingHFBinds $ map (\(EvBinds bs) -> bs) abs_ev_binds
-      hf_ev_binds <- getHFEvBinds
-      let -- All the TcEvBinds are EvBinds after typechecking
-          absEvB = map (\(EvBinds bs) ->
-                         EvBinds $ removeCommonBinds hf_ev_binds bs) abs_ev_binds
-          eToB :: ABExport GhcTc -> TcM EvBind
-          eToB ABE{..} = do
-             tys <- mapM zonkTcTyVar abs_tvs
-             vars <- mapM zonkEvVar abs_ev_vars
-             wrp <- ($ evId abe_poly)
-                 <$> (initDsTc $ dsHsWrapper $ mkWpEvVarApps vars
-                                             <.> mkWpTyApps tys
-                                             <.> abe_wrap) -- Always WpHole AFAICT
-             return $ EvBind abe_mono (EvExpr wrp) True
-          evbFvs = unionVarSets $ map ebFb $ bagToList $ evBindMapBinds hf_ev_binds
-            where ebFb (EvBind _ (EvExpr e) _) = exprFreeVars e
-          isRelExport :: ABExport GhcTc -> Bool
-          isRelExport ABE{..} = abe_mono `elemVarSet` evbFvs
-      -- We need to ensure that we are referring to the correct binders, in case
-      -- of recursive definitions. So we add lets to all the evidence.
-      wrpdBinds <- EvBinds . listToBag <$> mapM eToB (filter isRelExport abs_exports)
-
-      res <- mapBagM (pL fixBindScope) abs_binds
-      return $ fb{ abs_binds = res
-                 , abs_ev_binds = filter (not . isEmptyTcEvBinds ) $ wrpdBinds:absEvB}
-
-    -- | fixOutBinds maps over the nested local binds, but sets the flag to
-    -- recursive so that we can redefine any local functions with the right
-    -- wrapper in fixAbsBinds. It gets optimized away anyway, in case we
-    -- don't actually need the recusivity.
-    fixOutBinds :: HsLocalBindsLR GhcTc GhcTc -> TcM (HsLocalBindsLR GhcTc GhcTc)
-    fixOutBinds hv@(HsValBinds x (XValBindsLR (NValBinds nvbs sigs))) =
-      do nnvbs <- mapM fixNB nvbs
-         return (HsValBinds x (XValBindsLR (NValBinds nnvbs sigs)))
-         where fixNB (rf, b) = do
-                nb <- mapBagM (pL fixBindScope) b
-                -- We always set it to recursive, since we generate
-                -- wrappers from ABExports. It gets optimized away anyway.
-                return (rf, nb)
-
-    -- The rest of these are just walking over HsBinds and their various
-    -- sub-expressions
-    fixBindScope :: HsBindLR GhcTc GhcTc -> TcM (HsBindLR GhcTc GhcTc)
-    fixBindScope fb@FunBind{..} = do
-      res <- fixMatchGroupScope fun_matches
-      return $ fb{fun_matches = res}
-    fixBindScope fb@VarBind{..} = do
-      res <- pL fixExprScope var_rhs
-      return $ fb{var_rhs = res}
-    fixBindScope fb@PatBind{..} = do
-      res <- fixGRHSs pat_rhs
-      return $ fb{pat_rhs = res}
-    fixBindScope fb@AbsBinds{..} = fixAbsBindScope fb
-    fixBindScope x = return x
-    fixMatchGroupScope m@MG{mg_alts=L l alts} =
-         do res <- mapM (pL fixAltScope) alts
-            return $ m{mg_alts = (L l res)}
-    fixAltScope m@Match{..} = do
-        do res <- fixGRHSs m_grhss
-           return m{m_grhss=res}
-    fixGRHSs g@GRHSs{..} = do
-        ngrhss <- mapM (pL fixGRHS) grhssGRHSs
-        nlb <- pL fixLocalBinds grhssLocalBinds
-        return g{grhssGRHSs=ngrhss, grhssLocalBinds=nlb}
-    fixGRHS g@(GRHS x gs b) = do
-        nb <- pL fixExprScope b
-        return (GRHS x gs nb)
-    fixLocalBinds (HsValBinds x (ValBinds x2 bs sigs)) =
-      do nbs <- mapBagM (pL fixBindScope) bs
-         return (HsValBinds x (ValBinds x2 nbs sigs))
-    fixLocalBinds hv@(HsValBinds _ (XValBindsLR (NValBinds _ _))) =
-         fixOutBinds hv
-    fixLocalBinds x = return x
-    fixExprScope hv@(HsVar _ _) = fixVarExprScope hv
-    fixExprScope (HsLam x mg) = do
-        HsLam x <$> fixMatchGroupScope mg
-    fixExprScope (HsLamCase x mg) = do
-        HsLamCase x <$> fixMatchGroupScope mg
-    fixExprScope (HsApp x a1 a2) = do
-        pprOut "a1: " a1
-        pprOut "a2: " a2
-        na1 <- pL fixExprScope a1
-        na2 <- pL fixExprScope a2
-        return (HsApp x na1 na2)
-    fixExprScope (HsAppType x a1 wt) = do
-        na1 <- pL fixExprScope a1
-        return (HsAppType x na1 wt)
-    fixExprScope (OpApp x o1 o2 o3) = do
-        no1 <- pL fixExprScope o1
-        no2 <- pL fixExprScope o2
-        no3 <- pL fixExprScope o3
-        return (OpApp x no1 no2 no3)
-    fixExprScope (NegApp x e s) = do
-        ne <- pL fixExprScope e
-        return $ NegApp x ne s
-    fixExprScope (HsPar x e)  = do
-        ne <- pL fixExprScope e
-        return $ HsPar x ne
-    fixExprScope (ExplicitSum x c a e) = do
-        ne <- pL fixExprScope e
-        return $ ExplicitSum x c a ne
-    fixExprScope (HsCase x c mg) = do
-        nc <- pL fixExprScope c
-        nmg <- fixMatchGroupScope mg
-        return $ HsCase x nc nmg
-    fixExprScope (HsIf x m c t e) = do
-        nc <- pL fixExprScope c
-        nt <- pL fixExprScope t
-        ne <- pL fixExprScope e
-        return $ HsIf x m nc nt ne
-    fixExprScope (HsMultiIf x lgs) = do
-      nlgs <- mapM (pL fixGRHS) lgs
-      return $ HsMultiIf x nlgs
-    fixExprScope (HsLet x bs e) = do
-      ne <- pL fixExprScope e
-      nbs <- pL fixLocalBinds bs
-      return $ HsLet x nbs ne
-    fixExprScope (HsDo x ctxt (L l exprs)) = do
-      pprOut "hsd: " exprs
-      pprOut "hsdet: " $ text $ show $ map (toConstr . unLoc) exprs
-      nexprs <- mapM (pL fixStmtScope) exprs
-      return $ HsDo x ctxt (L l nexprs)
-    fixExprScope (ExplicitList x se exprs) = do
-      nexprs <- mapM (pL fixExprScope) exprs
-      return $ ExplicitList x se nexprs
-    fixExprScope ru@(RecordUpd{..}) = do
-        ne <- pL fixExprScope rupd_expr
-        upf <- mapM (pL fixUpF) rupd_flds
-        return ru{rupd_expr=ne, rupd_flds=upf}
-    fixExprScope (ExprWithTySig x e tc) =
-      do ne <- pL fixExprScope e
-         pprOut "est: " (e, ne)
-         return $ ExprWithTySig x ne tc
-    fixExprScope x = return x
-    fixStmtScope (LastStmt x e b s) =
-      do ne <- pL fixExprScope e
-         pprOut "lste: " (e, ne)
-         return (LastStmt x ne b s)
-    fixStmtScope (BindStmt x p e s1 s2) =
-      do ne <- pL fixExprScope e
-         return (BindStmt x p ne s1 s2)
-    fixStmtScope (ApplicativeStmt x apls se) =
-      do napls <- mapM fixApl apls
-         return $ ApplicativeStmt x napls se
-      where fixApl (se, ApplicativeArgOne x p e b) = do
-              ne <- pL fixExprScope e
-              return (se, ApplicativeArgOne x p ne b)
-            fixApl (se, ApplicativeArgMany x st f b) = do
-              nf <- fixExprScope f
-              nst <- mapM (pL fixStmtScope) st
-              return $ (se, ApplicativeArgMany x nst nf b)
-    fixStmtScope (BodyStmt x e s1 s2) =
-      do ne <- pL fixExprScope e
-         pprOut "bs: " (e, ne)
-         return (BodyStmt x ne s1 s2)
-    fixStmtScope (LetStmt x bs) =
-      do nbs <- pL fixLocalBinds bs
-         return (LetStmt x nbs)
-    fixStmtScope (ParStmt x bls e se) =
-      do ne <- fixExprScope e
-         nbls <- mapM fixParStmtBlock bls
-         return (ParStmt x nbls ne se)
-      where
-        fixParStmtBlock (ParStmtBlock x exprs idps se) = do
-          nexprs <- mapM (pL fixStmtScope) exprs
-          return $ ParStmtBlock x nexprs idps se
-    fixStmtScope r@RecStmt{..} = do
-      nst <- mapM (pL fixStmtScope) recS_stmts
-      return r{recS_stmts=nst}
-    fixStmtScope t@TransStmt{..} = do
-      nst <- mapM (pL fixStmtScope) trS_stmts
-      nu <- pL fixExprScope trS_using
-      nfm <- fixExprScope trS_fmap
-      nby <- case trS_by of
-                Just e -> Just <$> (pL fixExprScope e)
-                Nothing -> return Nothing
-      return t{trS_stmts=nst, trS_using=nu, trS_by=nby, trS_fmap=nfm}
-    fixStmtScope x = return x
-    -- [TODO]: we haven't implemented it for fixUpF, so we'll get an error
-    -- when synthesized holes are used in record updates.
-    fixUpF x = return x

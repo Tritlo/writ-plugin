@@ -11,7 +11,7 @@
 {-# LANGUAGE RankNTypes #-}
 {-# LANGUAGE AllowAmbiguousTypes #-}
 module WRIT.Configure (
-        Default, Promote, Ignore, Discharge,
+        Default, Ignore,
         Message(..), TypeError(..), ErrorMessage(..),
         -- Dynamic extension
         castDyn, dynDispatch
@@ -50,22 +50,6 @@ type family Default k :: k
 -- that we can discharge the constraint C whenever it is encountered, however,
 -- this is only allowed when the constraint C is an empty class dictionary.
 type family Ignore (c :: Constraint) :: Message
-
--- | The Discharge family allows us to specify equalities that can be discharged.
--- Note that Discharge is a special case of ignore for primitive equality
--- constraints, i.e. (a :: k) ~# (b :: k). But since primitive equality is not
--- specifiable as a matchable constraint for ignore, since the user defined
--- uses the ~ operator.
-type family Discharge (a :: k) (b :: k) :: Message
-
--- | The Promote family is a special case of the Discharge family that allows us
--- to specify which values can be automatically promoted to other values, if
--- they are Coercible.
-type family Promote (a :: Type) (b :: Type) :: Message
-
--- We require that Discharge (a :: *) (b :: *) to be Promote a b for any a,b.
-type instance Discharge (a :: Type) (b :: Type) =
-   OnlyIf (Coercible a b) (Promote a b)
 
 
 -- | castDyn casts a Dynamic to any typeable value, and fails with a descriptive
