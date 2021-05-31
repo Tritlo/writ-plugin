@@ -89,3 +89,4 @@ main = do
   print (goo 3 (toDyn B))
   print (loo 5 (toDyn B))
   print (loo 2 (toDyn C))
+  print (loo 2 (toDyn "OK"))

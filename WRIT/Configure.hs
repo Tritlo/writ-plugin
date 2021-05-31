@@ -59,7 +59,8 @@ dynDispatch insts fun_name class_name dispatcher =
          ++ class_name ++ "'!")
       _ -> error $ "No instance of '" ++ class_name ++ " " ++ show argt ++ "'"
                   ++ " found when dispatching for '"
-                  ++ fun_name ++ " :: " ++ show argt ++ " -> " ++ show targett
-                  ++ "'."
+                  ++ fun_name ++ " :: " ++ show targett
+                  ++ "', with 'Dynamic ~ " ++ show argt
+                  ++ "' in this context."
  where argt = dynTypeRep dispatcher
        targett = someTypeRep (Proxy :: Proxy b)

@@ -507,27 +507,31 @@ solveDynDispatch ptc@PTC{..} ct | CDictCan{..} <- ct
                          -> [[Type]]
                          -> Id
                          -> TcPluginM (EvExpr, [Ct])
-     -- For method 'loo :: Show a => Int -> a -> Int' in Foo with instances
+     -- For method 'loo :: Show a => Int -> a -> Int -> Int' in Foo with instances
      -- Foo A and Foo B, this will generate the following (in Core):
      -- Notation: {Foo A} = The dictionary for Foo A
      -- (\ (k :: Show Dynamic) (l :: Int) (m :: Dynamic) ->
-     --   dynDispatch @(Show Dynamic => Int -> Dynamic -> Int)
-     --               {Typeable (Show Dynamic => Int -> Dynamic -> Int)}
+     --   dynDispatch @(Show Dynamic => Int -> Dynamic -> Int -> Int)
+     --               {Typeable (Show Dynamic => Int -> Dynamic -> Int -> Int)}
      --               -- ^ Only used too lookup in the table
      --               [ (SomeTypeRep (typeRep :: TypeRep A), -- In core
-     --                  toDyn @(Show Dynamic => Int -> Dynamic -> Int)
-     --                        {Typeable (Show Dynamic => Int -> Dynamic -> Int)}
+     --                  toDyn @(Show Dynamic => Int -> Dynamic -> Int -> Int)
+     --                        {Typeable (Show Dynamic => Int -> Dynamic -> Int -> Int)}
      --                        (\ (k :: Show Dynamic) (l :: Int) (m :: Dynamic) ->
      --                           loo @A {Foo A} {Show A} l (castDyn m)))
      --               , (SomeTypeRep (typeRep :: TypeRep B), -- In core
-     --                  toDyn @(Show Dynamic => Int -> Dynamic -> Int)
-     --                        {Typeable (Show Dynamic => Int -> Dynamic -> Int)}
+     --                  toDyn @(Show Dynamic => Int -> Dynamic -> Int -> Int)
+     --                        {Typeable (Show Dynamic => Int -> Dynamic -> Int -> Int)}
      --                        (\ (k :: Show Dynamic) (l :: Int) (m :: Dynamic) ->
      --                           loo @B {Foo B} {Show B} l (castDyn m)))]
      --               -- ^ The dynamic dispatch table
+     --               "loo"
+     --               -- ^ The name of the function. Used for better error messages.
+     --               "Foo"
+     --               -- ^ The name of the class. Used for better error messages.
      --               (m :: Dynamic)
-     --               -- ^ The dynamic to dispatch on
-     --               (runtimeError @(Show Dynamic))
+     --               -- ^ The dynamic value to dispatch on
+     --               (runtimeError @(Show Dynamic) "Should never be evaluated!")
      --               -- ^ Provided to please the type gods. This dictionary
      --               --   is just thrown away by the function after dispatch.
      --               (l :: Int)
@@ -537,8 +541,15 @@ solveDynDispatch ptc@PTC{..} ct | CDictCan{..} <- ct
      --               (m :: Dynamic)
      --               -- ^ The dynamic again. This will go to a castDyn to the
      --               --   proper type before being evaluated at the function.
-     --)
+     -- )
      -- And similar entries for each function in the Foo class.
+     --
+     -- When given a dynamic (Dynamic (tr :: TypeRep a) (v :: a)), dynDispatch
+     -- looks up  (SomeTypeRep tr :: SomeTypeRep) in the dispatch table.
+     -- If it finds a function 'f' that matches, it converts it to the expected
+     -- value with 'fromDyn f', if possible, and emits a runtime error otherwise.
+     -- If a function with the matching type is not found, it also emits a
+     -- runtime error, saying that no matching instance was found.
      methodToDynDispatch cc_class class_tys fid = do
        -- Names included for better error messages.
        let fname = (occNameFS (getOccName fid))
