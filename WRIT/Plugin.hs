@@ -322,10 +322,9 @@ gritPlugin opts = TcPlugin initialize solve stop
                                       more ++ new_more,
                                       logs `Set.union` new_logs))
            order :: [(SolveFun, String)]
-           order = [ (solveOnlyIf,    "OnlyIf")
-                   , (solveDynamic, "Discharging")
-                   , (solveIgnore,    "Ignoring")
+           order = [ (solveDynamic, "Discharging")
                    , (solveDefault,   "Defaulting")
+                   , (solveDynamicTypeables,   "SDTs")
                    , (solveDynDispatch,   "Checking Dynamic Dispatch") ]
            to_check = wanted ++ derived
        (_, (solved_wanteds, more_cts, logs)) <-
@@ -341,9 +340,6 @@ gritPlugin opts = TcPlugin initialize solve stop
 
 
 data PluginTyCons = PTC { ptc_default :: TyCon
-                        , ptc_only_if :: TyCon
-                        , ptc_ignore  :: TyCon
-                        , ptc_msg :: TyCon
                         , ptc_dc :: DynCasts }
 
 data DynCasts = DC { dc_typeable :: Class
@@ -370,9 +366,6 @@ getPluginTyCons =
       case fpmRes of
          Found _ mod  ->
              do ptc_default <- getTyCon mod "Default"
-                ptc_ignore  <- getTyCon mod "Ignore"
-                ptc_msg     <- getPromDataCon mod "Msg"
-                ptc_only_if <- getPromDataCon mod "OnlyIf"
                 dc_cast_dyn <- getId mod "castDyn"
                 dc_dyn_dispatch <- getId mod "dynDispatch"
                 let ptc_dc = DC {..}
@@ -432,44 +425,78 @@ solveDefault ptc@PTC{..} ct =
                  pred_ty = mkPrimEqPredRole Nominal (mkTyVarTy var) defApp
                  defApp = mkTyConApp ptc_default [varType var]
 
--- Solves Γ |- c :: Constraint if Γ |- Ignore c ~ Msg m, *where c is an empty class*
-solveIgnore :: SolveFun
-solveIgnore ptc@PTC{..} ct
-  | CDictCan{..} <- ct, (null $ classMethods cc_class) = do
-  let ignore = mkTyConApp ptc_ignore [ctPred ct]
-  hasIgnore <- hasInst ignore
-  if not hasIgnore then wontSolve ct
-  else do (msg_check, msg_var) <- checkMsg ptc ct ignore
-          let log = Set.singleton (Log msg_var (ctLoc ct))
-              classCon = tyConSingleDataCon (classTyCon cc_class)
-              proof = evDataConApp classCon cc_tyargs []
-          couldSolve (Just (proof, ct)) [msg_check] log
-  | otherwise = wontSolve ct
+-- GHC doesn't know how to solve Typeable (Show Dynamic => Dynamic -> Int),
+-- but in core it's the same as Show Dynamic -> Dynamic -> Int. So we simply
+-- show that 'Show Dynamic' and 'Dynamic -> Int' are both typeable, and
+-- construct the evidence that 'Show Dynamic => Dynamic -> Int' is thus
+-- typeable.
+solveDynamicTypeables :: SolveFun
+solveDynamicTypeables ptc@PTC{..}
+   ct | CDictCan{..} <- ct
+      , cc_class == dc_typeable
+      , [kind, ty] <- cc_tyargs
+      , tcIsLiftedTypeKind kind
+      , (res_ty, preds@(p:ps)) <- splitPreds ty
+      , pts <- mapMaybe (splitTyConApp_maybe) preds
+      , all (tcEqType dynamic) $ concatMap snd pts =
+     do (r_typable_ev, r_typeable_ct) <- checkTypeable res_ty
+        -- We don't want to check the constraints here, since we won't need
+        -- them for the actual e.g. Show Dynamic, since we'll never
+        -- call the function at Dynamic.
+        -- constrs <- mapM (mkWanted (ctLoc ct)) preds
+        t_preds <- mapM checkTypeablePred pts
+        let (p_evs, p_cts) = unzip t_preds
+            checks = r_typeable_ct:(concat p_cts)
+            classCon = tyConSingleDataCon (classTyCon cc_class)
+            r_ty_ev = EvExpr $ evId r_typable_ev
+            (final_ty, proof) = foldr conTypeable (res_ty, r_ty_ev) p_evs
+        couldSolve (Just (proof, ct)) checks Set.empty
+     | otherwise = wontSolve ct
+  where
+     DC {..} = ptc_dc
+     dynamic = mkTyConApp dc_dynamic []
+     checkTypeablePred :: (TyCon, [Type]) -> TcPluginM ((Type, EvTerm), [Ct])
+     checkTypeablePred (tc, tys) = do
+       args_typeable <- mapM checkTypeable tys
+       let (_, evcts) = unzip args_typeable
+           ev = EvTypeableTyCon tc (map (EvExpr . evId . ctEvId) evcts)
+           ty = mkTyConApp tc tys
+       return ((ty, evTypeable ty ev), evcts)
+     conTypeable :: (Type, EvTerm) -> (Type, EvTerm) -> (Type, EvTerm)
+     conTypeable (fty, fterm) (argty, argterm) =
+       let res_ty = mkTyConApp funTyCon [tcTypeKind fty, tcTypeKind argty, fty, argty]
+           r_term = evTypeable res_ty $ EvTypeableTrFun fterm argterm
+       in (res_ty, r_term)
+
+     checkTypeable :: Type -> TcPluginM (EvId, Ct)
+     checkTypeable ty = do
+        c <- mkWanted (ctLoc ct) $ mkTyConApp (classTyCon dc_typeable) [tcTypeKind ty, ty]
+        return (ctEvId c, c)
+
 
 -- | Solves Γ |- C Dynamic
 solveDynDispatch :: SolveFun
-solveDynDispatch ptc@PTC{..} ct | CDictCan{..} <- ct =
-  do case cc_tyargs of
-       [arg] | arg `tcEqType` dynamic -> do
-         class_insts <- flip classInstances cc_class <$> getInstEnvs
-         let class_tys = map is_tys class_insts
-         -- We can only dispatch on singe argument classes
-         if not (all ((1 ==) . length) class_tys) then wontSolve ct
-         else do
-           -- Make sure we check any superclasses
-           scChecks <- mapM (mkWanted (ctLoc ct) .
-                             flip piResultTys cc_tyargs .
-                             mkSpecForAllTys (classTyVars cc_class))
-                             $ classSCTheta cc_class
-           let scEvIds = map (evId . ctEvId) scChecks
-           args_n_checks <- mapM (methodToDynDispatch cc_class class_tys)
-                                 (classMethods cc_class)
-           let log = Set.empty
-               classCon = tyConSingleDataCon (classTyCon cc_class)
-               (args, checks) = unzip args_n_checks
-               proof = evDataConApp classCon cc_tyargs $ scEvIds ++ args
-           couldSolve (Just (proof, ct)) (scChecks ++ concat checks) log
-       _ -> wontSolve ct
+solveDynDispatch ptc@PTC{..} ct | CDictCan{..} <- ct
+                                , [arg] <- cc_tyargs
+                                , arg `tcEqType` dynamic = do
+  class_insts <- flip classInstances cc_class <$> getInstEnvs
+  let class_tys = map is_tys class_insts
+  -- We can only dispatch on singe argument classes
+  if not (all ((1 ==) . length) class_tys) then wontSolve ct
+  else do
+    -- Make sure we check any superclasses
+    scChecks <- mapM (mkWanted (ctLoc ct) .
+                      flip piResultTys cc_tyargs .
+                      mkSpecForAllTys (classTyVars cc_class))
+                      $ classSCTheta cc_class
+    let scEvIds = map (evId . ctEvId) scChecks
+    args_n_checks <- mapM (methodToDynDispatch cc_class class_tys)
+                          (classMethods cc_class)
+    let log = Set.empty
+        classCon = tyConSingleDataCon (classTyCon cc_class)
+        (args, checks) = unzip args_n_checks
+        proof = evDataConApp classCon cc_tyargs $ scEvIds ++ args
+    couldSolve (Just (proof, ct)) (scChecks ++ concat checks) log
                                | otherwise = wontSolve ct
   where
      DC {..} = ptc_dc
@@ -495,18 +522,26 @@ solveDynDispatch ptc@PTC{..} ct | CDictCan{..} <- ct =
            dyn_ty = fill_ty enough_dynamics
            -- Whole ty is the type minus the Foo a in the beginning
            whole_ty = funResultTy $ piResultTys (varType fid) enough_dynamics
-           finalize (dp:lams) res_ty = do
+           unsatisfied_preds =map (flip piResultTy dynamic) $  drop 1 bound_preds
+           mkMissingDict t = mkRuntimeErrorApp rUNTIME_ERROR_ID t "Dynamic dictonary shouldn't be evaluated!"
+           dynb_pred_dicts = map mkMissingDict unsatisfied_preds
+       dyn_pred_vars <- unsafeTcPluginTcM $ mapM (mkSysLocalM (getOccFS fid)) unsatisfied_preds
+       let finalize (dp:lams) res_ty = do
              let revl = reverse (dp:lams)
                  mkFunApp a b = mkTyConApp funTyCon [tcTypeKind a,tcTypeKind b, a, b]
              (tev, check_typeable) <- checkTypeable whole_ty
-             dpt_els_n_checks <- mapM (\ct -> mkDpEl fid (fill_ty ct) revl dyn_ty bound_preds ct) class_tys
+             dpt_els_n_checks <- mapM (\ct -> mkDpEl fid whole_ty (fill_ty ct) revl dyn_ty bound_preds ct) class_tys
+             -- To make the types match up, we must make a dictionary for each of the predicates,
+             -- even though these will never be used.
              let (dpt_els, dpt_checks) = unzip dpt_els_n_checks
                  app = mkCoreApps (Var dc_dyn_dispatch)
                          ([ Type whole_ty, evId tev, mkListExpr dpt_ty dpt_els
                          , fun_name, class_name, Var dp]
+                         ++ dynb_pred_dicts
                          ++ (map Var revl))
                  checks = (check_typeable:(concat dpt_checks))
-                 lamApp = mkCoreLams revl app
+                 -- TODO app to pred dicts
+                 lamApp = mkCoreLams (dyn_pred_vars ++ revl) app
              return $ (lamApp, checks)
            -- We figure out all the arguments to the functions first from the type.
            loop lams ty = do
@@ -521,19 +556,12 @@ solveDynDispatch ptc@PTC{..} ct | CDictCan{..} <- ct =
        -- so we have to abort. Otherwise, we get a cryptic Typeable error.
        -- Best would be if we customized said error to say something like
        -- "Dynamic dispatch for Foo failed due to loo :: Show a => a -> Int"
-       if length preds <= 1
-       then return res
-       else do tec <- mkTypeErrorCt (ctLoc ct) $
-                "Could not create dynamic dispatch table for '"
-                ++ (unpackFS cname) ++ "' due to \n"
-                ++ "missing Typeable for '"
-                ++ (unpackFS fname) ++ " :: "
-                ++ showSDocUnsafe (ppr whole_ty) ++ "'"
-               return $ (++[tec]) <$> res
+       return res
 
      -- | The workhorse that constructs the dispatch tables.
-     mkDpEl :: Id -> Type -> [CoreBndr] -> Type -> [PredType] -> [Type] -> TcPluginM (CoreExpr, [Ct])
-     mkDpEl fid res_ty revl lamrety preds dts@[dp_ty] =
+     mkDpEl :: Id -> Type -> Type -> [CoreBndr] -> Type -> [PredType]
+            -> [Type] -> TcPluginM (CoreExpr, [Ct])
+     mkDpEl fid whole_ty res_ty revl lamrety preds dts@[dp_ty] =
         do (tev, check_typeable) <- checkTypeable lamrety
            (dptev, check_typeable_dp) <- checkTypeable dp_ty
            check_preds <- mapM (mkWanted (ctLoc ct) . flip piResultTys dts) preds
@@ -562,52 +590,22 @@ solveDynDispatch ptc@PTC{..} ct | CDictCan{..} <- ct =
                checks = [check_typeable, check_typeable_dp] ++ check_preds ++ (concat fappChecks)
                tup = mkCoreTup [strapp, dfapp]
            return (tup, checks)
-     mkDpEl _ _ _ _ _ tys = pprPanic "Multi-param typeclasses not supported!" $ ppr tys
+     mkDpEl _ _ _ _ _ _ tys = pprPanic "Multi-param typeclasses not supported!" $ ppr tys
 
      ------- Some Utils
 
      -- | We want to know what the predicates are, since we need to check them.
-     splitPreds :: Type -> (Type, [PredType])
-     splitPreds ty =
-       case tcSplitPredFunTy_maybe ty of
-         Just (pt, t) -> (pt:) <$> splitPreds t
-         _ -> (ty, [])
 
      checkTypeable :: Type -> TcPluginM (EvId, Ct)
      checkTypeable ty = do
         c <- mkWanted (ctLoc ct) $ mkTyConApp (classTyCon dc_typeable) [tcTypeKind ty, ty]
         return (ctEvId c, c)
 
-
--- Solve only if solves Γ |- OnlyIf c m_a ~ m_b, by checking  Γ |- c and
--- Γ |-  m_a ~ m_b
-solveOnlyIf :: SolveFun
-solveOnlyIf PTC{..} ct
-  -- As an optimization to avoid the constraint solver having to do too many
-  -- loops, we unwrap any nested OnlyIfs here, and gather all the constraints.
-  | Just (k1,ty1,ty2) <- splitEquality (ctPred ct)
-  , (msg:cons) <- reverse (unwrapOnlyIfs ty1)
-  , not $ null cons = do
-    let eq_ty = mkCoercionType Nominal msg ty2
-        ev = mkProof "grit-only-if" ty1 ty2
-    check_msg <- mkWanted (ctLoc ct) eq_ty
-    check_cons <- mapM (mkWanted (ctLoc ct)) cons
-    couldSolve (Just (ev, ct)) (check_msg:check_cons) Set.empty
-  | otherwise = wontSolve ct
-  where unwrapOnlyIfs msg | Just (tc, [con, msg]) <-  splitTyConApp_maybe msg
-                          , tc == ptc_only_if = con : unwrapOnlyIfs msg
-                          | otherwise = [msg]
-
--- checkMsg generates a `m ~ Msg m0` constraint that we can solve, which unifies
--- the type variable m0 with whatever the resulting type error message is.
-checkMsg :: PluginTyCons -> Ct -> Type -> TcPluginM (Ct, Type)
-checkMsg PTC{..} ct msg =  do
-  err_msg_kind <- flip mkTyConApp [] <$> getErrMsgCon
-  ty_var <- mkTyVarTy <$> newFlexiTyVar err_msg_kind
-  let eq_ty = mkCoercionType Nominal msg (mkTyConApp ptc_msg [ty_var])
-  ct <- mkWanted (ctLoc ct) eq_ty
-  ty_err <- mkTyErr ty_var
-  return (ct, ty_err)
+splitPreds :: Type -> (Type, [PredType])
+splitPreds ty =
+  case tcSplitPredFunTy_maybe ty of
+    Just (pt, t) -> (pt:) <$> splitPreds t
+    _ -> (ty, [])
 
 mkTyErr ::  Type -> TcPluginM Type
 mkTyErr msg = flip mkTyConApp [typeKind msg, msg] <$>
@@ -663,7 +661,6 @@ hasInst ty = case splitTyConApp_maybe ty of
 ----------------------------------------------------------------
 -- Marshalling to and from Dynamic
 ----------------------------------------------------------------
-
 -- | Solves Γ |- (a :: Type) ~ (b :: Type) if a ~ Dynamic or b ~ Dynamic
 solveDynamic :: SolveFun
 solveDynamic ptc@PTC{..} ct

@@ -1,13 +1,15 @@
+{-# LANGUAGE PatternSynonyms #-}
 {-# OPTIONS_GHC -fplugin=WRIT.Plugin
                 -fplugin-opt=WRIT.Plugin:marshal-dynamics
                 -fplugin-opt=WRIT.Plugin:debug
                 -dcore-lint
                  #-}
-
 {-# LANGUAGE ScopedTypeVariables #-}
 {-# LANGUAGE RankNTypes #-}
 {-# LANGUAGE ConstraintKinds #-}
 {-# LANGUAGE AllowAmbiguousTypes #-}
+{-# LANGUAGE ViewPatterns #-}
+{-# LANGUAGE GADTs #-}
 module Main where
 
 import WRIT.Configure
@@ -31,37 +33,57 @@ import qualified Data.Map as M
 -- xs = ["thanks", (), "i", False,
 --       "hate", (42 :: Int), "it"]
 
-data A = A deriving (Show)
+data A = A | C deriving (Show)
 data B = B deriving (Show)
 
+-- class Goo a where
+--   ok :: a -> Int
+
+-- instance Goo B where
+--     ok _ = 9
+
 class Foo a where
-    goo :: Int -> a -> Int
+    -- goo :: Int -> a -> Int
+    loo :: Show a => a -> Int
     foo :: a -> Int
     -- Problematic
-    loo :: Show a => a -> Int
-    hoo :: Show a => a -> Int
+    -- hoo :: Show a => a -> Int
+    -- boo :: Goo a => a -> Int
 
 instance Foo A where
     foo _ = 10
-    goo x _ = 10 + x
-    -- loo _ = 5
+    -- goo x _ = 10 + x
+    loo _ = 5
+
 
 instance Foo B where
     foo _ = 20
-    goo x _ = 20 + x
-    -- loo _ = 7
+    -- goo x _ = 20 + x
+    loo x = length (show x)
+    -- boo x = ok x
+
+-- pattern Is :: forall a. (Typeable a) => a -> Dynamic
+-- pattern Is res <- (fromDynamic @a -> Just res)
 
 main :: IO ()
 main = do
-    -- print xs
+        --  print $ case C of
+        --            Is A -> "was A"
+        --            Is B -> "was B"
+        --            Is C -> "was C"
+        --            x -> error (show x)
+        --  print $ case toDyn A of
+        --            Is (x :: A) -> "was " ++ show x
+        --            Is B -> "was B"
+        --            x -> error (show x)
 
         --   print $ getValsOfTy @String xs
-        --   let s = [A,B] :: [Dynamic]
+        --  let s = [A,B] :: [Dynamic]
         --   mapM_ (print . foo) s
         --   mapM_ (print . goo 5) s
         --   mapM_ (print . loo) s
-          print (foo (toDyn A))
-          print (foo (toDyn B))
-          print (goo 5 (toDyn A))
-          print (goo 6 (toDyn B))
-          print (loo (toDyn B))
+         print (foo (toDyn A))
+         print (foo (toDyn B))
+        --   print (goo 5 (toDyn A))
+        --   print (goo 6 (toDyn B))
+         print (loo (toDyn B))
