@@ -12,7 +12,8 @@ module WRIT.Plugin ( plugin, module WRIT.Configure ) where
 
 import WRIT.Configure
 
-import Control.Monad (when, unless, guard, foldM, zipWithM, msum)
+import Control.Monad
+    ( when, unless, guard, foldM, zipWithM, msum, filterM, replicateM )
 import Data.Maybe (mapMaybe, catMaybes, fromMaybe, fromJust, listToMaybe, isJust)
 import Data.Either
 import Data.IORef
@@ -41,33 +42,34 @@ import System.IO.Unsafe (unsafePerformIO)
 import Bag
 import FV (fvVarListVarSet, fvVarSet)
 
-#if __GLASGOW_HASKELL__ > 810
-import GHC.Plugins hiding (TcPlugin)
-import GHC.Tc.Plugin
-
-import GHC.Tc.Types
-import GHC.Tc.Types.Evidence
-import GHC.Tc.Types.Constraint
-import GHC.Tc.Utils.TcMType hiding (newWanted, newFlexiTyVar, zonkTcType)
+import qualified TcEnv as Tc (tcLookup)
 
 
-import GHC.Core.TyCo.Rep
-import GHC.Core.Predicate
-import GHC.Core.Class
 
-import GHC.Utils.Error
 
-import GHC.Builtin.Types.Prim
-import GHC.Builtin.Names
 
-import GHC.Types.Id.Make
 
-import GHC.Hs.Binds
-import GHC.Hs.Extension
-import GHC.Hs.Expr
-import GHC.Types.EvTerm (evCallStack)
 
-#else
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 import GhcPlugins hiding (TcPlugin)
 import TcRnTypes
 import TcPluginM
@@ -100,41 +102,40 @@ import TcRnMonad (keepAlive, getLclEnv, getGlobalRdrEnv, getGblEnv, newSysName)
 import TcHoleErrors
 import PrelInfo (knownKeyNames)
 import Data.Graph (graphFromEdges, topSort, scc)
-import Control.Monad (filterM, replicateM)
 import DsBinds (dsHsWrapper)
 import DsMonad (initDsTc)
 
 import TcEvTerm (evCallStack)
 
-#if __GLASGOW_HASKELL__ >= 810
+
 import GHC.Hs.Expr
 
-#else
-
---- Dynamic
-import HsBinds
-import HsExtension
-import HsExpr
--------
-
-#endif
-
-#if __GLASGOW_HASKELL__ < 810
 
 
--- Backported from 8.10
-isEqPrimPred = isCoVarType
-instance Outputable SDoc where
-  ppr x = x
 
-#else
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 
 import Constraint
 import Predicate
 
-#endif
 
-#endif
+
+
 
 
 --------------------------------------------------------------------------------
@@ -159,25 +160,25 @@ logSrc = ctLocSpan . log_loc
 instance Ord Log where
   compare a@Log{} b@Log{} =
       if logSrc a == logSrc b
-      then (compare `on` (showSDocUnsafe . ppr)) a b
+      then (compare `on` showSDocUnsafe . ppr) a b
       else (compare `on` logSrc) a b
   compare Log{} _ = LT
   compare _ Log{} = GT
   compare a@LogDefault{} b@LogDefault{} =
       if logSrc a == logSrc b
-      then (compare `on` (showSDocUnsafe . ppr)) a b
+      then (compare `on` showSDocUnsafe . ppr) a b
       else (compare `on` logSrc) a b
   compare LogDefault{} _ = LT
   compare _ LogDefault{} = GT
   compare a@LogMarshal{} b@LogMarshal{} =
       if logSrc a == logSrc b
-      then (compare `on` (showSDocUnsafe . ppr)) a b
+      then (compare `on` showSDocUnsafe . ppr) a b
       else (compare `on` logSrc) a b
   compare LogMarshal{} _ = LT
   compare _ LogMarshal{} = GT
   compare a@LogSDoc{} b@LogSDoc{} =
       if logSrc a == logSrc b
-      then (compare `on` (showSDocUnsafe . ppr)) a b
+      then (compare `on` showSDocUnsafe . ppr) a b
       else (compare `on` logSrc) a b
 
 instance Eq Log where
@@ -194,7 +195,7 @@ instance Eq Log where
    a@LogSDoc{} == b@LogSDoc{} =
        ((==) `on` logSrc) a b
        && (eqType `on` log_pred_ty) a b
-       && ((==) `on` (showSDocUnsafe . log_msg)) a b
+       && ((==) `on` showSDocUnsafe . log_msg) a b
    LogSDoc{} == _ = False
 
 instance Outputable Log where
@@ -229,19 +230,19 @@ zonkLog log = return log
 logToErr :: Log -> TcPluginM Ct
 logToErr Log{..} = mkWanted log_loc log_pred_ty
 logToErr LogDefault{..} =
-   do sDocToTyErr [ text "Defaulting"
-                  , quotes (ppr (mkTyVarTy log_var)
-                            <+> dcolon <+> ppr log_kind)
-                  , text "to"
-                  , quotes (ppr log_res)
-                  , text "in"
-                  , quotes (ppr log_pred_ty)] >>= mkWanted log_loc
+   sDocToTyErr [ text "Defaulting"
+            , quotes (ppr (mkTyVarTy log_var)
+                      <+> dcolon <+> ppr log_kind)
+            , text "to"
+            , quotes (ppr log_res)
+            , text "in"
+            , quotes (ppr log_pred_ty)] >>= mkWanted log_loc
 logToErr LogMarshal{..} =
-   do sDocToTyErr [ text "Marshalling"
-                  , quotes (ppr (log_pred_ty))
-                  , text (if log_to_dyn
-                          then "to Dynamic"
-                          else "from Dynamic") ] >>= mkWanted log_loc
+   sDocToTyErr [ text "Marshalling"
+            , quotes (ppr log_pred_ty)
+            , text (if log_to_dyn
+                    then "to Dynamic"
+                    else "from Dynamic") ] >>= mkWanted log_loc
 logToErr LogSDoc{..} = sDocToTyErr [log_msg] >>= mkWanted log_loc
 
 sDocToTyErr :: [SDoc] -> TcPluginM Type
@@ -257,11 +258,11 @@ sDocToTyErr docs =
 addWarning :: DynFlags -> Log -> TcPluginM ()
 addWarning dflags log = tcPluginIO $ warn (ppr log)
   where warn = putLogMsg dflags NoReason SevWarning
-#if __GLASGOW_HASKELL__ > 810
-                 (RealSrcSpan (logSrc log) Nothing)
-#else
+
+
+
                  (RealSrcSpan (logSrc log)) (defaultErrStyle dflags)
-#endif
+
 
 data Flags = Flags { f_debug            :: Bool
                    , f_quiet            :: Bool
@@ -375,7 +376,7 @@ getPluginTyCons =
          NotFound{..} -> pprPanic "Plugin module not found!" empty
   where getTyCon mod name = lookupOrig mod (mkTcOcc name) >>= tcLookupTyCon
         getDataCon mod name = lookupOrig mod (mkDataOcc name) >>= tcLookupDataCon
-        getPromDataCon mod name = promoteDataCon <$> (getDataCon mod name)
+        getPromDataCon mod name = promoteDataCon <$> getDataCon mod name
         getClass mod name = lookupOrig mod (mkClsOcc name) >>= tcLookupClass
         getId mod name = lookupOrig mod (mkVarOcc name) >>= tcLookupId
 
@@ -437,7 +438,7 @@ solveDynamicTypeables ptc@PTC{..}
       , [kind, ty] <- cc_tyargs
       , tcIsLiftedTypeKind kind
       , (res_ty, preds@(p:ps)) <- splitPreds ty
-      , pts <- mapMaybe (splitTyConApp_maybe) preds
+      , pts <- mapMaybe splitTyConApp_maybe preds
       , all (tcEqType dynamic) $ concatMap snd pts =
      do (r_typable_ev, r_typeable_ct) <- checkTypeable res_ty
         -- We don't want to check the constraints here, since we won't need
@@ -446,7 +447,7 @@ solveDynamicTypeables ptc@PTC{..}
         -- constrs <- mapM (mkWanted (ctLoc ct)) preds
         t_preds <- mapM checkTypeablePred pts
         let (p_evs, p_cts) = unzip t_preds
-            checks = r_typeable_ct:(concat p_cts)
+            checks = r_typeable_ct:concat p_cts
             classCon = tyConSingleDataCon (classTyCon cc_class)
             r_ty_ev = EvExpr $ evId r_typable_ev
             (final_ty, proof) = foldr conTypeable (res_ty, r_ty_ev) p_evs
@@ -552,8 +553,8 @@ solveDynDispatch ptc@PTC{..} ct | CDictCan{..} <- ct
      -- runtime error, saying that no matching instance was found.
      methodToDynDispatch cc_class class_tys fid = do
        -- Names included for better error messages.
-       let fname = (occNameFS (getOccName fid))
-           cname = (occNameFS (getOccName cc_class))
+       let fname = occNameFS (getOccName fid)
+           cname = occNameFS (getOccName cc_class)
        fun_name <- unsafeTcPluginTcM $ mkStringExprFS fname
        class_name <- unsafeTcPluginTcM $ mkStringExprFS cname
        let (tvs, ty) = tcSplitForAllVarBndrs (varType fid)
@@ -565,18 +566,20 @@ solveDynDispatch ptc@PTC{..} ct | CDictCan{..} <- ct
            dyn_ty = fill_ty enough_dynamics
            -- Whole ty is the type minus the Foo a in the beginning
            whole_ty = funResultTy $ piResultTys (varType fid) enough_dynamics
-           unsatisfied_preds =map (flip piResultTy dynamic) $  drop 1 bound_preds
-           mkMissingDict t = mkRuntimeErrorApp rUNTIME_ERROR_ID t "Dynamic dictonary shouldn't be evaluated!"
+           unsatisfied_preds = map (`piResultTy` dynamic) $  drop 1 bound_preds
+           mkMissingDict t =
+              mkRuntimeErrorApp rUNTIME_ERROR_ID t "Dynamic dictonary shouldn't be evaluated!"
            dynb_pred_dicts = map mkMissingDict unsatisfied_preds
        dyn_pred_vars <- unsafeTcPluginTcM $ mapM (mkSysLocalM (getOccFS fid)) unsatisfied_preds
-       let mkDpEl :: Type -> [CoreBndr]  -> [Type] -> TcPluginM (CoreExpr, [Ct])
+       let -- | The workhorse that constructs the dispatch tables.
+           mkDpEl :: Type -> [CoreBndr]  -> [Type] -> TcPluginM (CoreExpr, [Ct])
            mkDpEl res_ty revl dts@[dp_ty] =
               do (tev, check_typeable) <- checkTypeable whole_ty
                  (dptev, check_typeable_dp) <- checkTypeable dp_ty
                  check_preds <- mapM (mkWanted (ctLoc ct) . flip piResultTys dts) bound_preds
                  let dyn_app = mkCoreApps (Var dc_to_dyn) [Type whole_ty, Var tev]
                      pevs = map ctEvId check_preds
-                     fapp = mkCoreApps (Var fid) $ [Type dp_ty] ++ (map Var pevs)
+                     fapp = mkCoreApps (Var fid) $ Type dp_ty : map Var pevs
                      toFappArg :: (Type, Type, CoreBndr) -> TcPluginM (CoreExpr, [Ct])
                      toFappArg (t1,t2,b) | tcEqType t1 t2 = return (Var b, [])
                                          |  otherwise  = do
@@ -588,7 +591,7 @@ solveDynDispatch ptc@PTC{..} ct | CDictCan{..} <- ct
                          return (app,[check_typeable, ccs])
                      matches :: [CoreBndr] -> Type -> [(Type, Type, CoreBndr)]
                      matches [] _ = []
-                     matches (b:bs) ty = (varType b, t, b):(matches bs r)
+                     matches (b:bs) ty = (varType b, t, b):matches bs r
                        where (t,r) = splitFunTy ty -- Safe, binders are as long or longer.
                  (fappArgs, fappChecks) <- unzip <$> mapM toFappArg (matches revl res_ty)
                  let dfapp = mkCoreApps dyn_app [mkCoreLams (dyn_pred_vars ++ revl) $ mkCoreApps fapp fappArgs]
@@ -596,28 +599,29 @@ solveDynDispatch ptc@PTC{..} ct | CDictCan{..} <- ct
                      strapp = mkCoreApps
                                  (Var (dataConWrapId dc_sometyperep_dc))
                                  [Type (tcTypeKind dp_ty), Type dp_ty, trapp]
-                     checks = [check_typeable, check_typeable_dp] ++ check_preds ++ (concat fappChecks)
+                     checks = [check_typeable, check_typeable_dp] ++ check_preds ++ concat fappChecks
                      tup = mkCoreTup [strapp, dfapp]
                  return (tup, checks)
-           -- | The workhorse that constructs the dispatch tables.
            mkDpEl _ _ tys = pprPanic "Multi-param typeclasses not supported!" $ ppr tys
+
            finalize (dp:lams) res_ty = do
              let revl = reverse (dp:lams)
                  mkFunApp a b = mkTyConApp funTyCon [tcTypeKind a,tcTypeKind b, a, b]
              (tev, check_typeable) <- checkTypeable whole_ty
              dpt_els_n_checks <- mapM (\ct -> mkDpEl (fill_ty ct) revl ct) class_tys
-             -- To make the types match up, we must make a dictionary for each of the predicates,
-             -- even though these will never be used.
+             -- To make the types match up, we must make a dictionary for each of
+             -- the predicates, even though these will never be used.
              let (dpt_els, dpt_checks) = unzip dpt_els_n_checks
                  app = mkCoreApps (Var dc_dyn_dispatch)
                          ([ Type whole_ty, evId tev, mkListExpr dpt_ty dpt_els
                          , fun_name, class_name, Var dp]
                          ++ dynb_pred_dicts
-                         ++ (map Var revl))
-                 checks = (check_typeable:(concat dpt_checks))
+                         ++ map Var revl)
+                 checks = check_typeable:concat dpt_checks
                  -- TODO app to pred dicts
                  lamApp = mkCoreLams (dyn_pred_vars ++ revl) app
-             return $ (lamApp, checks)
+             return (lamApp, checks)
+
            -- We figure out all the arguments to the functions first from the type.
            loop lams ty = do
              case splitFunTy_maybe ty of
@@ -625,13 +629,7 @@ solveDynDispatch ptc@PTC{..} ct | CDictCan{..} <- ct
                   bid <- unsafeTcPluginTcM $ mkSysLocalM (getOccFS fid) t
                   loop (bid:lams) r
                 _ -> finalize lams ty
-       res <- loop [] dyn_ty
-       -- If there's a method we can't covert (e.g. due to it's type not
-       -- being Typeable), the entire core we generate will be incorrect,
-       -- so we have to abort. Otherwise, we get a cryptic Typeable error.
-       -- Best would be if we customized said error to say something like
-       -- "Dynamic dispatch for Foo failed due to loo :: Show a => a -> Int"
-       return res
+       loop [] dyn_ty
 
      checkTypeable :: Type -> TcPluginM (EvId, Ct)
      checkTypeable ty = do
@@ -658,7 +656,7 @@ mkTypeErrorCt loc str =
          app ty1 ty2 = mkTyConApp appCon [ty1, ty2]
          vapp ty1 ty2 = mkTyConApp vappCon [ty1, ty2]
          unwty = foldr1 app . map txt . intersperse " "
-         ty_err_ty = foldr1 vapp $ map unwty $ map words $ lines str
+         ty_err_ty = foldr1 vapp $ map (unwty . words) $ lines str
      te <- mkTyErr ty_err_ty
      mkWanted loc te
 
@@ -711,24 +709,9 @@ solveDynamic ptc@PTC{..} ct
     else wontSolve ct
   | otherwise = wontSolve ct
 
-data PluginState = PS { evMap :: Map FastString EvExpr , next :: Int }
 
--- Global IORef Hack used to pass information between phases, as recommended at HIW.
-pluginState :: IORef (PluginState)
-{-# NOINLINE  pluginState#-}
-pluginState = unsafePerformIO (newIORef (PS Map.empty 0))
-
-addDynExpr :: String -> EvExpr -> IO String
-addDynExpr base ev = do ps@((PS {..})) <- readIORef pluginState
-                        let marker = mkFastString (base ++ "-" ++ show next)
-                        writeIORef pluginState $
-                           ( PS { next = next + 1
-                                , evMap = Map.insert marker ev evMap })
-                        return $ unpackFS marker
-
-getDynExpr :: String -> IO (Maybe  EvExpr)
-getDynExpr marker =  do PS{..} <- readIORef pluginState
-                        return $ Map.lookup (mkFastString marker) evMap
+dYNAMICPLUGINPROV :: String
+dYNAMICPLUGINPROV = "grit-dynamic"
 
 marshalDynamic :: Kind -> Type -> Type -> SolveFun
 marshalDynamic k1 ty1 ty2 PTC{..} ct =
@@ -739,87 +722,111 @@ marshalDynamic k1 ty1 ty2 PTC{..} ct =
           log = Set.singleton (LogMarshal relTy (ctLoc ct) (isDyn ty2))
           hasTypeable = mkTyConApp (classTyCon dc_typeable) [k1, relTy]
           hasCallStack = mkTyConApp dc_has_call_stack []
-      -- we emit a proof with a very specific tag,
-      -- which we then use later.
-      -- However, since we don't refer to this until later
-      -- we need to make sure that the EvVar is marked as exported.
-      check_typeable <- exportWanted <$> mkWanted (ctLoc ct) hasTypeable
-      check_call_stack <- exportWanted <$> mkWanted (ctLoc ct) hasCallStack
-      -- We want the runtime errors to point to where the coerceDyn
-      -- is happening .
+      -- We need to have the call-stack and typeable dicts ready
+      checks@[check_typeable, check_call_stack]
+        <- mapM (mkWanted (ctLoc ct)) [hasTypeable, hasCallStack]
       callStack <- mkFromDynErrCallStack dc_cast_dyn ct $
-              ctEvEvId $ ctEvidence check_call_stack
+                    ctEvEvId $ ctEvidence check_call_stack
       let typeableDict = ctEvEvId $ ctEvidence check_typeable
           evExpr = if isDyn ty1
                    then mkApps (Var dc_cast_dyn) [Type relTy, Var typeableDict
                                                  , callStack]
                    else mkApps (Var dc_to_dyn) [Type relTy, Var typeableDict]
-      marker <- tcPluginIO $ addDynExpr "grit-dynamic" evExpr
-      let proof = if isDyn ty1 then mkProof marker dynamic relTy
-                               else mkProof marker relTy dynamic
-      couldSolve (Just (proof, ct)) [ check_typeable , check_call_stack] log
+          (at1,at2) = if isDyn ty1 then (dynamic, relTy) else (relTy, dynamic)
+          co = Coercion $ mkUnivCo (PluginProv dYNAMICPLUGINPROV) Nominal at1 at2
+          -- We have to jump through some hoops to make sure the expressions don't
+          -- go out of scope. We do this by havin the coercion be a case statement
+          -- that branches on the function, with just one default case. We use
+          -- these later to grab the expressions and put them in place (in
+          -- post-processing)
+          proof_binder = mkWildValBinder (exprType evExpr)
+          proof_alts = [(DEFAULT, [], co)]
+          proof = EvExpr $ Case evExpr proof_binder (exprType co) proof_alts
 
-exportWanted :: Ct -> Ct
-exportWanted (CNonCanonical (w@CtWanted {ctev_dest = EvVarDest var}))
- = CNonCanonical (w{ctev_dest = EvVarDest (setIdExported var)})
+      couldSolve (Just (proof, ct)) checks log
+
 
 mkFromDynErrCallStack :: Id -> Ct -> EvVar -> TcPluginM EvExpr
 mkFromDynErrCallStack fdid ct csDict =
   flip mkCast coercion <$>
-     (unsafeTcPluginTcM $ evCallStack (EvCsPushCall name loc var))
+     unsafeTcPluginTcM (evCallStack (EvCsPushCall name loc var))
   where name = idName fdid
         loc = ctLocSpan (ctLoc ct)
         var = Var csDict
         coercion = mkSymCo (unwrapIP (exprType var))
 
--- Post-processing for Dynamics
+-- | Post-processing for Dynamics
+
+type DynExprMap = Map Var (Expr Var)
+
 coreDyn :: [CommandLineOption] -> [CoreToDo] -> CoreM [CoreToDo]
-coreDyn clo tds = do
-  return $ (CoreDoPluginPass "WRIT" $ bindsOnlyPass addDyn):tds
+coreDyn clo tds = return $ CoreDoPluginPass "WRIT" (bindsOnlyPass addDyn):tds
   where Flags {..} = getFlags clo
         addDyn :: CoreProgram -> CoreM CoreProgram
-        addDyn program = mapM addDynToBind program
+        addDyn program =
+          reverse . snd <$> foldM fold_fun (Map.empty, []) program
+          where fold_fun (els,done) bind = do
+                  (nels, nbind) <- addDynToBind els bind
+                  return (nels, nbind:done)
 
-        addDynToBind :: CoreBind -> CoreM CoreBind
-        addDynToBind (NonRec b expr) = NonRec b <$> addDynToExpr expr
-        addDynToBind (Rec as) = do
+        addDynToBind :: DynExprMap -> CoreBind -> CoreM (DynExprMap, CoreBind)
+        addDynToBind dexprs (NonRec b expr) =
+           fmap (NonRec b) <$> addDynToExpr dexprs expr
+        addDynToBind dexprs (Rec as) = do
           let (vs, exprs) = unzip as
-          nexprs  <- mapM addDynToExpr exprs
-          return (Rec $ zip vs nexprs)
+          (ndexprs, revnexprs) <- foldM fold_fun (dexprs, []) exprs
+          return (ndexprs, Rec $ zip vs $ reverse revnexprs)
 
-        addDynToExpr :: Expr Var -> CoreM (Expr Var)
-        addDynToExpr (App expr arg) = do
-           nexpr <- addDynToExpr expr
-           narg <- addDynToExpr arg
-           return (App nexpr narg)
-        addDynToExpr (Lam b expr) = do
-           Lam b <$> addDynToExpr expr
-        addDynToExpr (Let binds expr) = do
-          do nbs <- addDynToBind binds
-             nexpr <- addDynToExpr expr
-             return (Let nbs nexpr)
-        addDynToExpr (Case expr b ty alts) =
-          do nexpr <- addDynToExpr expr
-             nalts <- mapM addDynToAlt alts
-             return (Case nexpr b ty nalts)
-        addDynToExpr (Tick t expr) = Tick t <$> addDynToExpr expr
-        addDynToExpr orig@(Cast expr coercion) = do
-          nexpr <- addDynToExpr expr
+          where fold_fun (els,done) expr = do
+                  (nels, nexpr) <- addDynToExpr els expr
+                  return (nels, nexpr:done)
+
+        pickUpDynamicMarshaling :: DynExprMap -> Expr Var -> DynExprMap
+        pickUpDynamicMarshaling dexprs
+          -- We match the monstrosity we created.
+          (Case (Case ce _ _
+            [(DEFAULT,[], Coercion (UnivCo (PluginProv prov) Nominal _ _))])
+            covar _ _ ) | prov == dYNAMICPLUGINPROV =
+              Map.insert covar ce dexprs
+        pickUpDynamicMarshaling dexprs _ = dexprs
+
+
+        addDynToExpr :: DynExprMap -> Expr Var -> CoreM (DynExprMap, Expr Var)
+        addDynToExpr dexprs (App expr arg) = do
+           (dexprs, nexpr) <- addDynToExpr dexprs expr
+           (dexprs, narg) <- addDynToExpr dexprs arg
+           return (dexprs, App nexpr narg)
+        addDynToExpr dexprs (Lam b expr) =
+           fmap (Lam b) <$> addDynToExpr dexprs expr
+        addDynToExpr dexprs (Let binds expr) =
+          do (dexprs, nbs) <- addDynToBind dexprs binds
+             (dexprs, nexpr) <- addDynToExpr dexprs expr
+             return (dexprs, Let nbs nexpr)
+        addDynToExpr dexprs c@(Case expr b ty alts) =
+          do dexprs <- return (pickUpDynamicMarshaling dexprs c)
+             (dexprs, nexpr) <- addDynToExpr dexprs expr
+             (dexprs, revnalts) <- foldM fold_fun (dexprs, []) alts
+             return (dexprs, Case nexpr b ty $ reverse revnalts)
+          where fold_fun (els,done) alt = do
+                  (nels, nalt) <- addDynToAlt els alt
+                  return (nels, nalt:done)
+
+        addDynToExpr dexprs (Tick t expr) =
+           fmap (Tick t) <$> addDynToExpr dexprs expr
+        addDynToExpr dexprs orig@(Cast expr coercion) = do
+          (dexprs, nexpr) <- addDynToExpr dexprs expr
           case coercion of
-            UnivCo (PluginProv prov) r t1 t2 ->
-              (liftIO $ getDynExpr prov) >>= \case
-                Just expr ->
-                  do let res = App expr nexpr
-                     when f_debug $
-                       liftIO $ putStrLn $ showSDocUnsafe $
-                       text "Replacing" <+> parens (ppr orig)
-                       <+> text "with" <+> parens (ppr res)
-                     return res
-                Nothing -> return (Cast nexpr coercion)
-            _ -> return (Cast nexpr coercion)
-        addDynToExpr no_sub_expr = return no_sub_expr
-        addDynToAlt :: (AltCon, [Var], Expr Var) ->
-                       CoreM (AltCon, [Var], Expr Var)
-        addDynToAlt (c, bs, expr) =
-            do nexpr <- addDynToExpr expr
-               return (c, bs, nexpr)
+            SubCo (CoVarCo co_var)| Just expr <- Map.lookup co_var dexprs -> do
+                let res = App expr nexpr
+                when f_debug $
+                  liftIO $ putStrLn $ showSDocUnsafe $
+                  text "Replacing" <+> parens (ppr orig)
+                  <+> text "with" <+> parens (ppr res)
+                return (dexprs, res)
+            _ -> return (dexprs, Cast nexpr coercion)
+        addDynToExpr dexprs no_sub_expr = return (dexprs, no_sub_expr)
+        addDynToAlt :: DynExprMap -> (AltCon, [Var], Expr Var) ->
+                       CoreM (DynExprMap, (AltCon, [Var], Expr Var))
+        addDynToAlt dexprs (c, bs, expr) =
+            do (dexprs', nexpr) <- addDynToExpr dexprs expr
+               return (dexprs', (c, bs, nexpr))
