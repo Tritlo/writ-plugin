@@ -761,72 +761,83 @@ type DynExprMap = Map Var (Expr Var)
 
 coreDyn :: [CommandLineOption] -> [CoreToDo] -> CoreM [CoreToDo]
 coreDyn clo tds = return $ CoreDoPluginPass "WRIT" (bindsOnlyPass addDyn):tds
-  where Flags {..} = getFlags clo
-        addDyn :: CoreProgram -> CoreM CoreProgram
-        addDyn program =
-          reverse . snd <$> foldM fold_fun (Map.empty, []) program
-          where fold_fun (els,done) bind = do
-                  (nels, nbind) <- addDynToBind els bind
-                  return (nels, nbind:done)
+  where
+    Flags {..} = getFlags clo
+    found var expr = Map.singleton var expr
+    addDyn :: CoreProgram -> CoreM CoreProgram
+    addDyn program = do
+      -- We have to go through the core twice, since the dexprs might be
+      -- bound later.
+      mapM (addDynToBind dexprs) program
+      where dexprs = Map.unions $ map getDexprBind program
 
-        addDynToBind :: DynExprMap -> CoreBind -> CoreM (DynExprMap, CoreBind)
-        addDynToBind dexprs (NonRec b expr) =
-           fmap (NonRec b) <$> addDynToExpr dexprs expr
-        addDynToBind dexprs (Rec as) = do
-          let (vs, exprs) = unzip as
-          (ndexprs, revnexprs) <- foldM fold_fun (dexprs, []) exprs
-          return (ndexprs, Rec $ zip vs $ reverse revnexprs)
+    getDexpr :: Expr Var -> Maybe (Expr Var)
+    getDexpr
+      (Case ce _ _
+       [(DEFAULT,[], Coercion (UnivCo (PluginProv prov) Nominal _ _))]) |
+       prov == dYNAMICPLUGINPROV
+       = Just ce
+    getDexpr _ = Nothing
 
-          where fold_fun (els,done) expr = do
-                  (nels, nexpr) <- addDynToExpr els expr
-                  return (nels, nexpr:done)
-
-        pickUpDynamicMarshaling :: DynExprMap -> Expr Var -> DynExprMap
-        pickUpDynamicMarshaling dexprs
-          -- We match the monstrosity we created.
-          (Case (Case ce _ _
-            [(DEFAULT,[], Coercion (UnivCo (PluginProv prov) Nominal _ _))])
-            covar _ _ ) | prov == dYNAMICPLUGINPROV =
-              Map.insert covar ce dexprs
-        pickUpDynamicMarshaling dexprs _ = dexprs
+    getDexprBind :: CoreBind -> DynExprMap
+    getDexprBind (NonRec covar expr) | Just de <- getDexpr expr = found covar de
+    getDexprBind (NonRec _ expr) = getDexprExpr expr
+    getDexprBind (Rec as) = Map.unions $ map getDexpB as
+        where getDexpB :: (Var, Expr Var) -> DynExprMap
+              getDexpB (var,exp) | Just de <- getDexpr exp =
+                  found var de `Map.union` getDexprExpr exp
+              getDexpB (_,exp) = getDexprExpr exp
 
 
-        addDynToExpr :: DynExprMap -> Expr Var -> CoreM (DynExprMap, Expr Var)
-        addDynToExpr dexprs (App expr arg) = do
-           (dexprs, nexpr) <- addDynToExpr dexprs expr
-           (dexprs, narg) <- addDynToExpr dexprs arg
-           return (dexprs, App nexpr narg)
-        addDynToExpr dexprs (Lam b expr) =
-           fmap (Lam b) <$> addDynToExpr dexprs expr
-        addDynToExpr dexprs (Let binds expr) =
-          do (dexprs, nbs) <- addDynToBind dexprs binds
-             (dexprs, nexpr) <- addDynToExpr dexprs expr
-             return (dexprs, Let nbs nexpr)
-        addDynToExpr dexprs c@(Case expr b ty alts) =
-          do dexprs <- return (pickUpDynamicMarshaling dexprs c)
-             (dexprs, nexpr) <- addDynToExpr dexprs expr
-             (dexprs, revnalts) <- foldM fold_fun (dexprs, []) alts
-             return (dexprs, Case nexpr b ty $ reverse revnalts)
-          where fold_fun (els,done) alt = do
-                  (nels, nalt) <- addDynToAlt els alt
-                  return (nels, nalt:done)
+    getDexprExpr :: Expr Var -> DynExprMap
+    getDexprExpr (Var _) = Map.empty
+    getDexprExpr (Lit _) = Map.empty
+    getDexprExpr (App expr arg) = getDexprExpr expr `Map.union` getDexprExpr arg
+    getDexprExpr (Lam _ expr) = getDexprExpr expr
+    getDexprExpr (Let b expr) = getDexprBind b `Map.union` getDexprExpr expr
+    getDexprExpr (Case expr covar _ alts ) =
+      let edex = case getDexpr expr of
+                   Just de -> found covar de
+                   _ -> getDexprExpr expr
+      in edex `Map.union` Map.unions (map getDexprAlt alts)
+      where getDexprAlt (_, _, e) = getDexprExpr e
+    getDexprExpr (Cast expr co) = getDexprExpr expr
+    getDexprExpr (Tick _ expr) = getDexprExpr expr
+    getDexprExpr (Type _) = Map.empty
+    getDexprExpr (Coercion _) = Map.empty
 
-        addDynToExpr dexprs (Tick t expr) =
-           fmap (Tick t) <$> addDynToExpr dexprs expr
-        addDynToExpr dexprs orig@(Cast expr coercion) = do
-          (dexprs, nexpr) <- addDynToExpr dexprs expr
-          case coercion of
-            SubCo (CoVarCo co_var)| Just expr <- Map.lookup co_var dexprs -> do
-                let res = App expr nexpr
-                when f_debug $
-                  liftIO $ putStrLn $ showSDocUnsafe $
-                  text "Replacing" <+> parens (ppr orig)
-                  <+> text "with" <+> parens (ppr res)
-                return (dexprs, res)
-            _ -> return (dexprs, Cast nexpr coercion)
-        addDynToExpr dexprs no_sub_expr = return (dexprs, no_sub_expr)
-        addDynToAlt :: DynExprMap -> (AltCon, [Var], Expr Var) ->
-                       CoreM (DynExprMap, (AltCon, [Var], Expr Var))
-        addDynToAlt dexprs (c, bs, expr) =
-            do (dexprs', nexpr) <- addDynToExpr dexprs expr
-               return (dexprs', (c, bs, nexpr))
+
+
+    addDynToBind :: DynExprMap -> CoreBind -> CoreM CoreBind
+    addDynToBind dexprs (NonRec b expr) = NonRec b <$> addDynToExpr dexprs expr
+    addDynToBind dexprs (Rec as) = do
+      let (vs, exprs) = unzip as
+      nexprs <- mapM (addDynToExpr dexprs) exprs
+      return (Rec $ zip vs nexprs)
+
+    addDynToExpr :: DynExprMap -> Expr Var -> CoreM (Expr Var)
+    addDynToExpr _ e@(Var _) = pure e
+    addDynToExpr _ e@(Lit _) = pure e
+    addDynToExpr dexprs (App expr arg) =
+      App <$> addDynToExpr dexprs expr <*> addDynToExpr dexprs arg
+    addDynToExpr dexprs (Lam b expr) = Lam b <$> addDynToExpr dexprs expr
+    addDynToExpr dexprs (Let binds expr) = Let <$> addDynToBind dexprs binds
+                                               <*> addDynToExpr dexprs expr
+    addDynToExpr dexprs (Case expr b ty alts) =
+             (\ne na -> Case ne b ty na) <$> addDynToExpr dexprs expr
+                                         <*> mapM addDynToAlt alts
+      where addDynToAlt (c, bs, expr) = (c, bs,) <$> addDynToExpr dexprs expr
+    addDynToExpr dexprs orig@(Cast expr coercion) = do
+      nexpr <- addDynToExpr dexprs expr
+      case coercion of
+        SubCo (CoVarCo co_var)| Just expr <- Map.lookup co_var dexprs -> do
+            let res = App expr nexpr
+            when f_debug $
+              liftIO $ putStrLn $ showSDocUnsafe $
+              text "Replacing" <+> parens (ppr orig)
+              <+> text "with" <+> parens (ppr res)
+            return res
+        _ -> return (Cast nexpr coercion)
+    addDynToExpr dexprs (Tick t expr) = Tick t <$> addDynToExpr dexprs expr
+    addDynToExpr _ e@(Type _) = pure e
+    addDynToExpr _ e@(Coercion _) = pure e
