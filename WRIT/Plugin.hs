@@ -427,54 +427,228 @@ solveDefault ptc@PTC{..} ct =
                  pred_ty = mkPrimEqPredRole Nominal (mkTyVarTy var) defApp
                  defApp = mkTyConApp ptc_default [varType var]
 
--- GHC doesn't know how to solve Typeable (Show Dynamic => Dynamic -> Int),
--- but in core it's the same as Show Dynamic -> Dynamic -> Int. So we simply
--- show that 'Show Dynamic' and 'Dynamic -> Int' are both typeable, and
--- construct the evidence that 'Show Dynamic => Dynamic -> Int' is thus
--- typeable.
-solveDynamicTypeables :: SolveFun
-solveDynamicTypeables ptc@PTC{..}
-   ct | CDictCan{..} <- ct
-      , cc_class == dc_typeable
-      , [kind, ty] <- cc_tyargs
-      , tcIsLiftedTypeKind kind
-      , (res_ty, preds@(p:ps)) <- splitPreds ty
-      , pts <- mapMaybe splitTyConApp_maybe preds
-      , all (tcEqType dynamic) $ concatMap snd pts =
-     do (r_typable_ev, r_typeable_ct) <- checkTypeable res_ty
-        -- We don't want to check the constraints here, since we won't need
-        -- them for the actual e.g. Show Dynamic, since we'll never
-        -- call the function at Dynamic.
-        -- constrs <- mapM (mkWanted (ctLoc ct)) preds
-        t_preds <- mapM checkTypeablePred pts
-        let (p_evs, p_cts) = unzip t_preds
-            checks = r_typeable_ct:concat p_cts
-            classCon = tyConSingleDataCon (classTyCon cc_class)
-            r_ty_ev = EvExpr $ evId r_typable_ev
-            (final_ty, proof) = foldr conTypeable (res_ty, r_ty_ev) p_evs
-        couldSolve (Just (proof, ct)) checks Set.empty
-     | otherwise = wontSolve ct
+
+mkTyErr ::  Type -> TcPluginM Type
+mkTyErr msg = flip mkTyConApp [typeKind msg, msg] <$>
+                 tcLookupTyCon errorMessageTypeErrorFamName
+
+-- | Creates a type error with the given string at the given loc.
+mkTypeErrorCt :: CtLoc -> String -> TcPluginM Ct
+mkTypeErrorCt loc str =
+  do txtCon <- promoteDataCon <$> tcLookupDataCon typeErrorTextDataConName
+     appCon <- promoteDataCon <$> tcLookupDataCon typeErrorAppendDataConName
+     vappCon <- promoteDataCon <$> tcLookupDataCon  typeErrorVAppendDataConName
+     let txt str = mkTyConApp txtCon [mkStrLitTy $ fsLit str]
+         app ty1 ty2 = mkTyConApp appCon [ty1, ty2]
+         vapp ty1 ty2 = mkTyConApp vappCon [ty1, ty2]
+         unwty = foldr1 app . map txt . intersperse " "
+         ty_err_ty = foldr1 vapp $ map (unwty . words) $ lines str
+     te <- mkTyErr ty_err_ty
+     mkWanted loc te
+
+getErrMsgCon :: TcPluginM TyCon
+getErrMsgCon = lookupOrig gHC_TYPELITS (mkTcOcc "ErrorMessage") >>= tcLookupTyCon
+-- Utils
+mkDerived :: CtLoc -> PredType -> TcPluginM Ct
+mkDerived loc eq_ty = flip setCtLoc loc . CNonCanonical <$> newDerived loc eq_ty
+
+mkWanted :: CtLoc -> PredType -> TcPluginM Ct
+mkWanted loc eq_ty = flip setCtLoc loc . CNonCanonical <$> newWanted loc eq_ty
+
+mkGiven :: CtLoc -> PredType -> EvExpr -> TcPluginM Ct
+mkGiven loc eq_ty ev = flip setCtLoc loc . CNonCanonical <$> newGiven loc eq_ty ev
+
+mkProof :: String -> Type -> Type -> EvTerm
+mkProof str ty1 ty2 = evCoercion $ mkUnivCo (PluginProv str) Nominal ty1 ty2
+
+splitEquality :: Type -> Maybe (Kind, Type, Type)
+splitEquality pred =
+  do (tyCon, [k1, k2, ty1,ty2]) <- splitTyConApp_maybe pred
+     guard (tyCon == eqPrimTyCon)
+     guard (k1 `eqType` k2)
+     return (k1, ty1,ty2)
+
+inspectSol :: Ord d => [Either a (Maybe b, [c], Set d)]
+           -> ([a], ([b], [c], Set d))
+inspectSol xs = (ls, (catMaybes sols, concat more, Set.unions logs))
+  where (ls, rs) = partitionEithers xs
+        (sols, more, logs) = unzip3 rs
+
+----------------------------------------------------------------
+-- Marshalling to and from Dynamic
+----------------------------------------------------------------
+-- | Solves Γ |- (a :: Type) ~ (b :: Type) if a ~ Dynamic or b ~ Dynamic
+solveDynamic :: SolveFun
+solveDynamic ptc@PTC{..} ct
+ | Just (k1,ty1,ty2) <- splitEquality (ctPred ct) = do
+    let DC {..} = ptc_dc
+        dynamic = mkTyConApp dc_dynamic []
+        kIsType = tcIsLiftedTypeKind k1
+        isDyn ty = ty `tcEqType` dynamic
+    if kIsType && (isDyn ty1 || isDyn ty2)
+    then marshalDynamic k1 ty1 ty2 ptc ct
+    else wontSolve ct
+  | otherwise = wontSolve ct
+
+
+dYNAMICPLUGINPROV :: String
+dYNAMICPLUGINPROV = "grit-dynamic"
+
+marshalDynamic :: Kind -> Type -> Type -> SolveFun
+marshalDynamic k1 ty1 ty2 PTC{..} ct@(CIrredCan CtWanted{ctev_dest = HoleDest coho} _) =
+   do let DC {..} = ptc_dc
+          dynamic = mkTyConApp dc_dynamic []
+          isDyn ty = ty `tcEqType` dynamic
+          relTy = if isDyn ty1 then ty2 else ty1
+          log = Set.singleton (LogMarshal relTy (ctLoc ct) (isDyn ty2))
+          hasTypeable = mkTyConApp (classTyCon dc_typeable) [k1, relTy]
+          hasCallStack = mkTyConApp dc_has_call_stack []
+      checks@[check_typeable, check_call_stack] <- mapM (mkWanted (ctLoc ct)) [hasTypeable, hasCallStack]
+      call_stack <- mkFromDynErrCallStack dc_cast_dyn ct $ ctEvEvId $ ctEvidence check_call_stack
+      let typeableDict = ctEvEvId $ ctEvidence check_typeable
+          evExpr = if isDyn ty1
+                   then mkApps (Var dc_cast_dyn) [Type relTy, Var typeableDict, call_stack]
+                   else mkApps (Var dc_to_dyn) [Type relTy, Var typeableDict]
+          (at1,at2) = if isDyn ty1 then (dynamic, relTy) else (relTy, dynamic)
+      deb <- unsafeTcPluginTcM $ mkSysLocalM (fsLit dYNAMICPLUGINPROV) (exprType evExpr)
+
+      let mkProof prov = mkUnivCo (PluginProv prov) Nominal at1 at2
+      if isTopTcLevel (ctLocLevel $ ctLoc ct)
+      then do -- setEvBind allows us to emit the evExpr we built, and since
+              -- we're at the top, it will be emitted as an exported variable
+              let prov = marshalVarToString deb
+              setEvBind $ mkGivenEvBind (setIdExported deb) (EvExpr evExpr)
+              couldSolve (Just (evCoercion (mkProof prov), ct)) checks log
+      else do -- we're within a function, so setting the evBinds won't actually
+              -- put it within scope.
+              let prov = dYNAMICPLUGINPROV
+                  let_b = Let (NonRec deb evExpr)
+                          -- By binding and seqing, we ensure that the evExpr
+                          -- doesn't get erased.
+                          (seqVar deb $ Coercion $ mkProof prov)
+              couldSolve (Just (EvExpr let_b, ct)) checks log
+
+
+
+marshalDynamic _ _ _ _  ct = wontSolve ct
+
+-- By applying the same function when generating the provinence and for the
+-- lookup of the variable name later, we know we will find the corresponding
+-- variable.
+marshalVarToString :: Var -> String
+marshalVarToString var = nstr ++ "_" ++ ustr
+  where nstr = occNameString (occName var)
+        ustr = show (varUnique var)
+
+mkFromDynErrCallStack :: Id -> Ct -> EvVar -> TcPluginM EvExpr
+mkFromDynErrCallStack fdid ct csDict =
+  flip mkCast coercion <$>
+     unsafeTcPluginTcM (evCallStack (EvCsPushCall name loc var))
+  where name = idName fdid
+        loc = ctLocSpan (ctLoc ct)
+        var = Var csDict
+        coercion = mkSymCo (unwrapIP (exprType var))
+
+-- | Post-processing for Dynamics
+
+type DynExprMap  = Map (Either String Var) (Expr Var) -- These we need to find from case exprs.
+
+-- | Here we replace the "proofs" of the casts with te actual calls to toDyn
+-- and castDyn.
+coreDyn :: [CommandLineOption] -> [CoreToDo] -> CoreM [CoreToDo]
+coreDyn clo tds = return $ CoreDoPluginPass "WRIT" (bindsOnlyPass addDyn):tds
   where
-     DC {..} = ptc_dc
-     dynamic = mkTyConApp dc_dynamic []
-     checkTypeablePred :: (TyCon, [Type]) -> TcPluginM ((Type, EvTerm), [Ct])
-     checkTypeablePred (tc, tys) = do
-       args_typeable <- mapM checkTypeable tys
-       let (_, evcts) = unzip args_typeable
-           ev = EvTypeableTyCon tc (map (EvExpr . evId . ctEvId) evcts)
-           ty = mkTyConApp tc tys
-       return ((ty, evTypeable ty ev), evcts)
-     conTypeable :: (Type, EvTerm) -> (Type, EvTerm) -> (Type, EvTerm)
-     conTypeable (fty, fterm) (argty, argterm) =
-       let res_ty = mkTyConApp funTyCon [tcTypeKind fty, tcTypeKind argty, fty, argty]
-           r_term = evTypeable res_ty $ EvTypeableTrFun fterm argterm
-       in (res_ty, r_term)
+    Flags {..} = getFlags clo
+    found var expr = Map.singleton var expr
+    addDyn :: CoreProgram -> CoreM CoreProgram
+    addDyn program = mapM (addDynToBind dexprs) program
+      where
+        dexprs = Map.fromList $ concatMap getDynamicCastsBind program
 
-     checkTypeable :: Type -> TcPluginM (EvId, Ct)
-     checkTypeable ty = do
-        c <- mkWanted (ctLoc ct) $ mkTyConApp (classTyCon dc_typeable) [tcTypeKind ty, ty]
-        return (ctEvId c, c)
+    -- We need to find the two types of expressions, either the exported globals
+    -- (which we can then directly use, or the seq'd ones buried within cases
+    -- for locals).
+    -- We grab the `grit-dynamic_a1bK :: A -> Dynamics` from the binds, and
+    -- the `case case <dyn_expr> of {DEFAULT -> <UnivCo proof>} of <covar>` from
+    -- the expressions, where Left <grit-dynamic_var_name> and Right <covar>.
+    getDynamicCastsBind :: CoreBind -> [(Either String Var, Expr Var)]
+    getDynamicCastsBind (NonRec var expr) |
+      occNameString (occName var) == dYNAMICPLUGINPROV =
+        (Left $ marshalVarToString var, Var var):getDynamicCastsExpr expr
+    getDynamicCastsBind (NonRec _ expr) = getDynamicCastsExpr expr
+    getDynamicCastsBind (Rec as) =
+      -- The top level ones will never be recursive.
+      concatMap (getDynamicCastsExpr . snd) as
 
+    getDynamicCastsExpr :: Expr Var -> [(Either String Var, Expr Var)]
+    getDynamicCastsExpr (Var _) = []
+    getDynamicCastsExpr (Lit _) = []
+    getDynamicCastsExpr (App expr arg) =
+      concatMap getDynamicCastsExpr [expr, arg]
+    getDynamicCastsExpr (Lam _ expr) = getDynamicCastsExpr expr
+    getDynamicCastsExpr (Let bind expr) =
+      getDynamicCastsBind bind ++ getDynamicCastsExpr expr
+    getDynamicCastsExpr c@(Case expr covar _ alts) =
+       ecasts ++ concatMap gdcAlts alts
+      where gdcAlts (_,_,e) = getDynamicCastsExpr e
+            ecasts = case expr of
+              -- This is the expression build by the seqVar, though unfortunately,
+              -- the var itself isn't preserved. It's OK though, since we have
+              -- to replace the covar itself and not from the variable name.
+              Case dexpr _ _ [(DEFAULT, [], Coercion (UnivCo (PluginProv prov) _ _ _))] |
+                prov == dYNAMICPLUGINPROV -> [(Right covar, dexpr)]
+              _ -> getDynamicCastsExpr expr
+    getDynamicCastsExpr (Cast expr _) = getDynamicCastsExpr expr
+    getDynamicCastsExpr (Tick _ expr) = getDynamicCastsExpr expr
+    getDynamicCastsExpr (Type _) = []
+    getDynamicCastsExpr (Coercion _) = []
+
+
+
+    addDynToBind :: DynExprMap -> CoreBind -> CoreM CoreBind
+    addDynToBind dexprs (NonRec b expr) = NonRec b <$> addDynToExpr dexprs expr
+    addDynToBind dexprs (Rec as) = do
+      let (vs, exprs) = unzip as
+      nexprs <- mapM (addDynToExpr dexprs) exprs
+      return (Rec $ zip vs nexprs)
+
+
+    addDynToExpr :: DynExprMap -> Expr Var -> CoreM (Expr Var)
+    addDynToExpr _ e@(Var _) = pure e
+    addDynToExpr _ e@(Lit _) = pure e
+    addDynToExpr dexprs (App expr arg) =
+      App <$> addDynToExpr dexprs expr <*> addDynToExpr dexprs arg
+    addDynToExpr dexprs (Lam b expr) = Lam b <$> addDynToExpr dexprs expr
+    addDynToExpr dexprs (Let binds expr) = Let <$> addDynToBind dexprs binds
+                                               <*> addDynToExpr dexprs expr
+    addDynToExpr dexprs (Case expr b ty alts) =
+             (\ne na -> Case ne b ty na) <$> addDynToExpr dexprs expr
+                                         <*> mapM addDynToAlt alts
+      where addDynToAlt (c, bs, expr) = (c, bs,) <$> addDynToExpr dexprs expr
+    -- Cast is the only place that we do any work beyond just recursing over
+    -- the sub-expressions. Here we replace the
+    -- (A `cast` UnivCo (PluginProv <grit-dynamic_var_name>) Nominal A Dynamic)
+    -- and (B `cast` SubCo <covar>) that was generated in the TcPlugin with
+    -- the respective (grit-dynamic_var_name A) (i.e. apply the function to A)
+    -- and (toDyn @B ... B).
+    addDynToExpr dexprs orig@(Cast expr coercion) = do
+      nexpr <- addDynToExpr dexprs expr
+      case coercion of
+        UnivCo (PluginProv prov) _ _ _ |
+           Just expr <- dexprs Map.!? Left prov -> found expr nexpr
+        SubCo (CoVarCo co) | Just expr <- dexprs Map.!? Right co -> found expr nexpr
+        UnivCo (PluginProv _) _ _ _ -> pprPanic "Unfound var" $ ppr coercion
+        _ -> return (Cast nexpr coercion)
+      where found expr nexpr = do
+               let res = App expr nexpr
+               when f_debug $
+                 liftIO $ putStrLn $ showSDocUnsafe $
+                 text "Replacing" <+> parens (ppr orig)
+                 <+> text "with" <+> parens (ppr res)
+               return res
+    addDynToExpr dexprs (Tick t expr) = Tick t <$> addDynToExpr dexprs expr
+    addDynToExpr _ e@(Type _) = pure e
+    addDynToExpr _ e@(Coercion _) = pure e
 
 -- | Solves Γ |- C Dynamic
 solveDynDispatch :: SolveFun
@@ -643,217 +817,50 @@ splitPreds ty =
     Just (pt, t) -> (pt:) <$> splitPreds t
     _ -> (ty, [])
 
-mkTyErr ::  Type -> TcPluginM Type
-mkTyErr msg = flip mkTyConApp [typeKind msg, msg] <$>
-                 tcLookupTyCon errorMessageTypeErrorFamName
-
--- | Creates a type error with the given string at the given loc.
-mkTypeErrorCt :: CtLoc -> String -> TcPluginM Ct
-mkTypeErrorCt loc str =
-  do txtCon <- promoteDataCon <$> tcLookupDataCon typeErrorTextDataConName
-     appCon <- promoteDataCon <$> tcLookupDataCon typeErrorAppendDataConName
-     vappCon <- promoteDataCon <$> tcLookupDataCon  typeErrorVAppendDataConName
-     let txt str = mkTyConApp txtCon [mkStrLitTy $ fsLit str]
-         app ty1 ty2 = mkTyConApp appCon [ty1, ty2]
-         vapp ty1 ty2 = mkTyConApp vappCon [ty1, ty2]
-         unwty = foldr1 app . map txt . intersperse " "
-         ty_err_ty = foldr1 vapp $ map (unwty . words) $ lines str
-     te <- mkTyErr ty_err_ty
-     mkWanted loc te
-
-getErrMsgCon :: TcPluginM TyCon
-getErrMsgCon = lookupOrig gHC_TYPELITS (mkTcOcc "ErrorMessage") >>= tcLookupTyCon
--- Utils
-mkDerived :: CtLoc -> PredType -> TcPluginM Ct
-mkDerived loc eq_ty = flip setCtLoc loc . CNonCanonical <$> newDerived loc eq_ty
-
-mkWanted :: CtLoc -> PredType -> TcPluginM Ct
-mkWanted loc eq_ty = flip setCtLoc loc . CNonCanonical <$> newWanted loc eq_ty
-
-mkGiven :: CtLoc -> PredType -> EvExpr -> TcPluginM Ct
-mkGiven loc eq_ty ev = flip setCtLoc loc . CNonCanonical <$> newGiven loc eq_ty ev
-
-mkProof :: String -> Type -> Type -> EvTerm
-mkProof str ty1 ty2 = evCoercion $ mkUnivCo (PluginProv str) Nominal ty1 ty2
-
-splitEquality :: Type -> Maybe (Kind, Type, Type)
-splitEquality pred =
-  do (tyCon, [k1, k2, ty1,ty2]) <- splitTyConApp_maybe pred
-     guard (tyCon == eqPrimTyCon)
-     guard (k1 `eqType` k2)
-     return (k1, ty1,ty2)
-
-inspectSol :: Ord d => [Either a (Maybe b, [c], Set d)]
-           -> ([a], ([b], [c], Set d))
-inspectSol xs = (ls, (catMaybes sols, concat more, Set.unions logs))
-  where (ls, rs) = partitionEithers xs
-        (sols, more, logs) = unzip3 rs
-
-hasInst :: Type -> TcPluginM Bool
-hasInst ty = case splitTyConApp_maybe ty of
-              Just (tc, args) -> isJust <$> matchFam tc args
-              _ -> return False
-
-----------------------------------------------------------------
--- Marshalling to and from Dynamic
-----------------------------------------------------------------
--- | Solves Γ |- (a :: Type) ~ (b :: Type) if a ~ Dynamic or b ~ Dynamic
-solveDynamic :: SolveFun
-solveDynamic ptc@PTC{..} ct
- | Just (k1,ty1,ty2) <- splitEquality (ctPred ct) = do
-    let DC {..} = ptc_dc
-        dynamic = mkTyConApp dc_dynamic []
-        kIsType = tcIsLiftedTypeKind k1
-        isDyn ty = ty `tcEqType` dynamic
-    if kIsType && (isDyn ty1 || isDyn ty2)
-    then marshalDynamic k1 ty1 ty2 ptc ct
-    else wontSolve ct
-  | otherwise = wontSolve ct
-
-
-dYNAMICPLUGINPROV :: String
-dYNAMICPLUGINPROV = "grit-dynamic"
-
-marshalDynamic :: Kind -> Type -> Type -> SolveFun
-marshalDynamic k1 ty1 ty2 PTC{..} ct@(CIrredCan CtWanted{ctev_dest = HoleDest coho} _) =
-   do let DC {..} = ptc_dc
-          dynamic = mkTyConApp dc_dynamic []
-          isDyn ty = ty `tcEqType` dynamic
-          relTy = if isDyn ty1 then ty2 else ty1
-          log = Set.singleton (LogMarshal relTy (ctLoc ct) (isDyn ty2))
-          hasTypeable = mkTyConApp (classTyCon dc_typeable) [k1, relTy]
-          hasCallStack = mkTyConApp dc_has_call_stack []
-      checks@[check_typeable, check_call_stack] <- mapM (mkWanted (ctLoc ct)) [hasTypeable, hasCallStack]
-      call_stack <- mkFromDynErrCallStack dc_cast_dyn ct $ ctEvEvId $ ctEvidence check_call_stack
-      let typeableDict = ctEvEvId $ ctEvidence check_typeable
-          evExpr = if isDyn ty1
-                   then mkApps (Var dc_cast_dyn) [Type relTy, Var typeableDict, call_stack]
-                   else mkApps (Var dc_to_dyn) [Type relTy, Var typeableDict]
-          (at1,at2) = if isDyn ty1 then (dynamic, relTy) else (relTy, dynamic)
-      deb <- unsafeTcPluginTcM $ mkSysLocalM (fsLit dYNAMICPLUGINPROV) (exprType evExpr)
-
-      let mkProof prov = mkUnivCo (PluginProv prov) Nominal at1 at2
-      if isTopTcLevel (ctLocLevel $ ctLoc ct)
-      then do -- setEvBind allows us to emit the evExpr we built, and since
-              -- we're at the top, it will be emitted as an exported variable
-              let prov = marshalVarToString deb
-              setEvBind $ mkGivenEvBind (setIdExported deb) (EvExpr evExpr)
-              couldSolve (Just (evCoercion (mkProof prov), ct)) checks log
-      else do -- we're within a function, so setting the evBinds won't actually
-              -- put it within scope.
-              let prov = dYNAMICPLUGINPROV
-                  let_b = Let (NonRec deb evExpr)
-                          -- By binding and seqing, we ensure that the evExpr
-                          -- doesn't get erased.
-                          (seqVar deb $ Coercion $ mkProof prov)
-              couldSolve (Just (EvExpr let_b, ct)) checks log
-
-
-
-marshalDynamic _ _ _ _  ct = wontSolve ct
-
--- By applying the same function when generating the provinence and for the
--- lookup, we guarantee we will find the right var.
-marshalVarToString :: Var -> String
-marshalVarToString var = nstr ++ "_" ++ ustr
-  where nstr = occNameString (occName var)
-        ustr = show (varUnique  var)
-
-mkFromDynErrCallStack :: Id -> Ct -> EvVar -> TcPluginM EvExpr
-mkFromDynErrCallStack fdid ct csDict =
-  flip mkCast coercion <$>
-     unsafeTcPluginTcM (evCallStack (EvCsPushCall name loc var))
-  where name = idName fdid
-        loc = ctLocSpan (ctLoc ct)
-        var = Var csDict
-        coercion = mkSymCo (unwrapIP (exprType var))
-
--- | Post-processing for Dynamics
-
-type DynExprMap  = Map (Either String Var) (Expr Var) -- These we need to find from case exprs.
-
--- | Here we replace the "proofs" of the casts with te actual calls to toDyn
--- and castDyn.
-coreDyn :: [CommandLineOption] -> [CoreToDo] -> CoreM [CoreToDo]
-coreDyn clo tds = return $ CoreDoPluginPass "WRIT" (bindsOnlyPass addDyn):tds
+-- | GHC doesn't know how to solve Typeable (Show Dynamic => Dynamic -> Int),
+-- but in core it's the same as Show Dynamic -> Dynamic -> Int. So we simply
+-- show that 'Show Dynamic' and 'Dynamic -> Int' are both typeable, and
+-- construct the evidence that 'Show Dynamic => Dynamic -> Int' is thus
+-- typeable.
+solveDynamicTypeables :: SolveFun
+solveDynamicTypeables ptc@PTC{..}
+   ct | CDictCan{..} <- ct
+      , cc_class == dc_typeable
+      , [kind, ty] <- cc_tyargs
+      , tcIsLiftedTypeKind kind
+      , (res_ty, preds@(p:ps)) <- splitPreds ty
+      , pts <- mapMaybe splitTyConApp_maybe preds
+      , all (tcEqType dynamic) $ concatMap snd pts =
+     do (r_typable_ev, r_typeable_ct) <- checkTypeable res_ty
+        -- We don't want to check the constraints here, since we won't need
+        -- them for the actual e.g. Show Dynamic, since we'll never
+        -- call the function at Dynamic.
+        -- constrs <- mapM (mkWanted (ctLoc ct)) preds
+        t_preds <- mapM checkTypeablePred pts
+        let (p_evs, p_cts) = unzip t_preds
+            checks = r_typeable_ct:concat p_cts
+            classCon = tyConSingleDataCon (classTyCon cc_class)
+            r_ty_ev = EvExpr $ evId r_typable_ev
+            (final_ty, proof) = foldr conTypeable (res_ty, r_ty_ev) p_evs
+        couldSolve (Just (proof, ct)) checks Set.empty
+     | otherwise = wontSolve ct
   where
-    Flags {..} = getFlags clo
-    found var expr = Map.singleton var expr
-    addDyn :: CoreProgram -> CoreM CoreProgram
-    addDyn program = mapM (addDynToBind dexprs) program
-      where
-        dexprs = Map.fromList $ concatMap getDynamicCastsBind program
+     DC {..} = ptc_dc
+     dynamic = mkTyConApp dc_dynamic []
+     checkTypeablePred :: (TyCon, [Type]) -> TcPluginM ((Type, EvTerm), [Ct])
+     checkTypeablePred (tc, tys) = do
+       args_typeable <- mapM checkTypeable tys
+       let (_, evcts) = unzip args_typeable
+           ev = EvTypeableTyCon tc (map (EvExpr . evId . ctEvId) evcts)
+           ty = mkTyConApp tc tys
+       return ((ty, evTypeable ty ev), evcts)
+     conTypeable :: (Type, EvTerm) -> (Type, EvTerm) -> (Type, EvTerm)
+     conTypeable (fty, fterm) (argty, argterm) =
+       let res_ty = mkTyConApp funTyCon [tcTypeKind fty, tcTypeKind argty, fty, argty]
+           r_term = evTypeable res_ty $ EvTypeableTrFun fterm argterm
+       in (res_ty, r_term)
 
-    -- We need to find the two types of expressions, either the exported globals
-    -- (which we can then directly use, or the seq'd ones buried within cases
-    -- for locals).
-
-    getDynamicCastsBind :: CoreBind -> [(Either String Var, Expr Var)]
-    getDynamicCastsBind (NonRec var expr) |
-      occNameString (occName var) == dYNAMICPLUGINPROV =
-        (Left $ marshalVarToString var, Var var):getDynamicCastsExpr expr
-    getDynamicCastsBind (NonRec _ expr) = getDynamicCastsExpr expr
-    getDynamicCastsBind (Rec as) =
-      -- The top level ones will never be recursive.
-      concatMap (getDynamicCastsExpr . snd) as
-
-    getDynamicCastsExpr :: Expr Var -> [(Either String Var, Expr Var)]
-    getDynamicCastsExpr (Var _) = []
-    getDynamicCastsExpr (Lit _) = []
-    getDynamicCastsExpr (App expr arg) =
-      concatMap getDynamicCastsExpr [expr, arg]
-    getDynamicCastsExpr (Lam _ expr) = getDynamicCastsExpr expr
-    getDynamicCastsExpr (Let bind expr) =
-      getDynamicCastsBind bind ++ getDynamicCastsExpr expr
-    getDynamicCastsExpr c@(Case expr covar _ alts) =
-       ecasts ++ concatMap gdcAlts alts
-      where gdcAlts (_,_,e) = getDynamicCastsExpr e
-            ecasts = case expr of
-              Case dexpr _ _ [(DEFAULT, [], Coercion (UnivCo (PluginProv prov) _ _ _))] |
-                prov == dYNAMICPLUGINPROV -> [(Right covar, dexpr)]
-              _ -> getDynamicCastsExpr expr
-    getDynamicCastsExpr (Cast expr _) = getDynamicCastsExpr expr
-    getDynamicCastsExpr (Tick _ expr) = getDynamicCastsExpr expr
-    getDynamicCastsExpr (Type _) = []
-    getDynamicCastsExpr (Coercion _) = []
-
-
-
-    addDynToBind :: DynExprMap -> CoreBind -> CoreM CoreBind
-    addDynToBind dexprs (NonRec b expr) = NonRec b <$> addDynToExpr dexprs expr
-    addDynToBind dexprs (Rec as) = do
-      let (vs, exprs) = unzip as
-      nexprs <- mapM (addDynToExpr dexprs) exprs
-      return (Rec $ zip vs nexprs)
-
-
-    addDynToExpr :: DynExprMap -> Expr Var -> CoreM (Expr Var)
-    addDynToExpr _ e@(Var _) = pure e
-    addDynToExpr _ e@(Lit _) = pure e
-    addDynToExpr dexprs (App expr arg) =
-      App <$> addDynToExpr dexprs expr <*> addDynToExpr dexprs arg
-    addDynToExpr dexprs (Lam b expr) = Lam b <$> addDynToExpr dexprs expr
-    addDynToExpr dexprs (Let binds expr) = Let <$> addDynToBind dexprs binds
-                                               <*> addDynToExpr dexprs expr
-    addDynToExpr dexprs (Case expr b ty alts) =
-             (\ne na -> Case ne b ty na) <$> addDynToExpr dexprs expr
-                                         <*> mapM addDynToAlt alts
-      where addDynToAlt (c, bs, expr) = (c, bs,) <$> addDynToExpr dexprs expr
-    addDynToExpr dexprs orig@(Cast expr coercion) = do
-      nexpr <- addDynToExpr dexprs expr
-      case coercion of
-        UnivCo (PluginProv prov) _ _ _ |
-           Just expr <- dexprs Map.!? Left prov -> found expr nexpr
-        SubCo (CoVarCo co) | Just expr <- dexprs Map.!? Right co -> found expr nexpr
-        UnivCo (PluginProv _) _ _ _ -> pprPanic "Unfound var" $ ppr coercion
-        _ -> return (Cast nexpr coercion)
-      where found expr nexpr = do
-               let res = App expr nexpr
-               when f_debug $
-                 liftIO $ putStrLn $ showSDocUnsafe $
-                 text "Replacing" <+> parens (ppr orig)
-                 <+> text "with" <+> parens (ppr res)
-               return res
-    addDynToExpr dexprs (Tick t expr) = Tick t <$> addDynToExpr dexprs expr
-    addDynToExpr _ e@(Type _) = pure e
-    addDynToExpr _ e@(Coercion _) = pure e
+     checkTypeable :: Type -> TcPluginM (EvId, Ct)
+     checkTypeable ty = do
+        c <- mkWanted (ctLoc ct) $ mkTyConApp (classTyCon dc_typeable) [tcTypeKind ty, ty]
+        return (ctEvId c, c)
