@@ -11,7 +11,7 @@ module WRIT.Plugin ( plugin, module WRIT.Configure ) where
 
 import WRIT.Configure
 
-import Control.Monad (when, unless, guard, foldM, zipWithM, msum)
+import Control.Monad (when, unless, guard, foldM, zipWithM, msum, filterM, replicateM )
 import Data.Maybe (mapMaybe, catMaybes, fromMaybe, fromJust, listToMaybe, isJust)
 import Data.Either
 import Data.IORef
@@ -23,8 +23,6 @@ import Data.Data (Data, toConstr)
 import Prelude hiding ((<>))
 import qualified Data.Set as Set
 import Data.Set (Set)
-import Data.Proxy
-import Data.Dynamic
 import Type.Reflection (someTypeRep)
 import Text.Read (readMaybe)
 
@@ -40,38 +38,9 @@ import System.IO.Unsafe (unsafePerformIO)
 import Bag
 import FV (fvVarListVarSet, fvVarSet)
 
-#if __GLASGOW_HASKELL__ > 810
-import GHC.Plugins hiding (TcPlugin)
-import GHC.Tc.Plugin
-
-import GHC.Tc.Types
-import GHC.Tc.Types.Evidence
-import GHC.Tc.Types.Constraint
-import GHC.Tc.Utils.TcMType hiding (newWanted, newFlexiTyVar, zonkTcType)
-
-
-import GHC.Core.TyCo.Rep
-import GHC.Core.Predicate
-import GHC.Core.Class
-
-import GHC.Utils.Error
-
-import GHC.Builtin.Types.Prim
-import GHC.Builtin.Names
-
-import GHC.Types.Id.Make
-
-import GHC.Hs.Binds
-import GHC.Hs.Extension
-import GHC.Hs.Expr
-import GHC.Types.EvTerm (evCallStack)
-
-#else
-#if __GLASGOW_HASKELL__ >= 810
 import GHC.Hs.Extension
 import GHC.Hs.Binds
 import GHC.Hs.Expr
-#endif
 
 import GhcPlugins hiding (TcPlugin)
 import TcRnTypes
@@ -84,19 +53,12 @@ import TysPrim
 import PrelNames
 import TyCoRep
 
-import ClsInst
 import Class
-import Inst hiding (newWanted)
 
-import MkId
 import TcMType hiding (newWanted, newFlexiTyVar, zonkTcType)
 import qualified TcMType as TcM
 
 import TcType
-import CoAxiom
-import Unify
-import TcHsSyn
-
 
 -- Holefits
 import RdrName (globalRdrEnvElts)
@@ -104,40 +66,13 @@ import TcRnMonad (keepAlive, getLclEnv, getGlobalRdrEnv, getGblEnv, newSysName)
 import TcHoleErrors
 import PrelInfo (knownKeyNames)
 import Data.Graph (graphFromEdges, topSort)
-import Control.Monad (filterM, replicateM)
 import DsBinds (dsHsWrapper)
 import DsMonad (initDsTc)
 
 import TcEvTerm (evCallStack)
 
-#if __GLASGOW_HASKELL__ >= 810
-import GHC.Hs.Expr
-
-#else
-
---- Dynamic
-import HsBinds
-import HsExtension
-import HsExpr
--------
-
-#endif
-
-#if __GLASGOW_HASKELL__ < 810
-
--- Backported from 8.10
-isEqPrimPred = isCoVarType
-instance Outputable SDoc where
-  ppr x = x
-
-#else
-
 import Constraint
-import Predicate
 
-#endif
-
-#endif
 
 
 
@@ -148,15 +83,13 @@ plugin :: Plugin
 plugin = defaultPlugin { tcPlugin = Just . gritPlugin
                        , pluginRecompile = purePlugin
                        , typeCheckResultAction = fixFitScope
-#if __GLASGOW_HASKELL__ >= 810
                        , holeFitPlugin = \_ -> Just $
                            fromPureHFPlugin (HoleFitPlugin {
                                               candPlugin = \_ c -> return c,
                                               fitPlugin = \h f ->
-                                                case (tyHCt h) >>= holeCtOcc of
+                                                case tyHCt h >>= holeCtOcc of
                                                   Just occ -> byCommons occ f
                                                   _ -> return f })
-#endif
                        , installCoreToDos = coreDyn }
 
 --------------------------------------------------------------------------------
@@ -252,7 +185,7 @@ logToErr LogDefault{..} =
                   , quotes (ppr log_pred_ty)] >>= mkWanted log_loc
 logToErr LogMarshal{..} =
    do sDocToTyErr [ text "Marshalling"
-                  , quotes (ppr (log_pred_ty))
+                  , quotes (ppr log_pred_ty)
                   , text (if log_to_dyn
                           then "to Dynamic"
                           else "from Dynamic") ] >>= mkWanted log_loc
@@ -271,11 +204,7 @@ sDocToTyErr docs =
 addWarning :: DynFlags -> Log -> TcPluginM ()
 addWarning dflags log = tcPluginIO $ warn (ppr log)
   where warn = putLogMsg dflags NoReason SevWarning
-#if __GLASGOW_HASKELL__ > 810
-                 (RealSrcSpan (logSrc log) Nothing)
-#else
                  (RealSrcSpan (logSrc log)) (defaultErrStyle dflags)
-#endif
 
 data Flags = Flags { f_debug            :: Bool
                    , f_quiet            :: Bool
@@ -447,7 +376,7 @@ solveDefault ptc@PTC{..} ct =
 -- Solves Γ |- c :: Constraint if Γ |- Ignore c ~ Msg m, *where c is an empty class*
 solveIgnore :: SolveFun
 solveIgnore ptc@PTC{..} ct
-  | CDictCan{..} <- ct, (null $ classMethods cc_class) = do
+  | CDictCan{..} <- ct, null (classMethods cc_class) = do
   let ignore = mkTyConApp ptc_ignore [ctPred ct]
   hasIgnore <- hasInst ignore
   if not hasIgnore then wontSolve ct
@@ -567,7 +496,7 @@ hasInst ty = case splitTyConApp_maybe ty of
 data PluginState = PS { evMap :: Map FastString EvExpr , next :: Int }
 
 -- Global IORef Hack used to pass information between phases, as recommended at HIW.
-pluginState :: IORef (PluginState)
+pluginState :: IORef PluginState
 {-# NOINLINE  pluginState#-}
 pluginState = unsafePerformIO (newIORef (PS Map.empty 0))
 
@@ -613,13 +542,12 @@ marshalDynamic k1 ty1 ty2 PTC{..} ct =
       couldSolve (Just (proof, ct)) [ check_typeable , check_call_stack] log
 
 exportWanted :: Ct -> Ct
-exportWanted (CNonCanonical (w@CtWanted {ctev_dest = EvVarDest var}))
+exportWanted (CNonCanonical w@CtWanted{ctev_dest = EvVarDest var})
  = CNonCanonical (w{ctev_dest = EvVarDest (setIdExported var)})
 
 mkFromDynErrCallStack :: Id -> Ct -> EvVar -> TcPluginM EvExpr
 mkFromDynErrCallStack fdid ct csDict =
-  flip mkCast coercion <$>
-     (unsafeTcPluginTcM $ evCallStack (EvCsPushCall name loc var))
+  flip mkCast coercion <$> unsafeTcPluginTcM (evCallStack (EvCsPushCall name loc var))
   where name = idName fdid
         loc = ctLocSpan (ctLoc ct)
         var = Var csDict
@@ -628,7 +556,7 @@ mkFromDynErrCallStack fdid ct csDict =
 -- Post-processing for Dynamics
 coreDyn :: [CommandLineOption] -> [CoreToDo] -> CoreM [CoreToDo]
 coreDyn clo tds = do
-  return $ (CoreDoPluginPass "WRIT" $ bindsOnlyPass addDyn):tds
+  return $ CoreDoPluginPass "WRIT" (bindsOnlyPass addDyn):tds
   where Flags {..} = getFlags clo
         addDyn :: CoreProgram -> CoreM CoreProgram
         addDyn program = mapM addDynToBind program
@@ -660,7 +588,7 @@ coreDyn clo tds = do
           nexpr <- addDynToExpr expr
           case coercion of
             UnivCo (PluginProv prov) r t1 t2 ->
-              (liftIO $ getDynExpr prov) >>= \case
+              liftIO (getDynExpr prov) >>= \case
                 Just expr ->
                   do let res = App expr nexpr
                      when f_debug $
@@ -688,16 +616,11 @@ solveHole flags@Flags{f_fill_holes=True, ..} other_cts ptc@PTC{..}
   do fits <- do
       -- We don't need to wrap the implics here, because we are already there
       -- in the environment
-#if __GLASGOW_HASKELL__ >= 810
       hfPlugs <- unsafeTcPluginTcM $ tcg_hf_plugins <$> getGblEnv
       let ty_h = TyH (listToBag relCts) [] (Just ct)
           (candidatePlugins, fitPlugins) =
-             unzip $ map (\p-> ((candPlugin p) ty_h, (fitPlugin p) ty_h)) hfPlugs
+             unzip $ map (\p-> (candPlugin p ty_h, fitPlugin p ty_h)) hfPlugs
           holeFilter = flip (tcFilterHoleFits Nothing ty_h)
-#else
-      let (candidatePlugins, fitPlugins) = ([],[byCommons occ])
-          holeFilter = flip (tcFilterHoleFits Nothing [] relCts)
-#endif
         -- We generate refinement-level-hole-fits as well, but we don't want to
         -- loop indefinitely, so we only go down one level.
       unsafeTcPluginTcM $
@@ -707,10 +630,11 @@ solveHole flags@Flags{f_fill_holes=True, ..} other_cts ptc@PTC{..}
 
           ref_tys <-  mapM (mkRefTy ct) [0..ty_lvl]
           cands <- getCandsInScope ct >>= flip (foldM (flip ($))) candidatePlugins
-          fits <- mapM (\t -> fmap snd (holeFilter cands t)) ref_tys
-          if (sum $ map length fits) == 0 then return []
-          else concat <$> mapM sortByGraph fits
-            >>= fmap (filter isCooked) . flip (foldM (flip ($))) fitPlugins
+          fits <- mapM (fmap snd . holeFilter cands) ref_tys
+          if sum (map length fits) == 0 then return []
+          else mapM sortByGraph fits >>=
+                (fmap (filter isCooked) .  flip (foldM (flip ($))) fitPlugins)
+                . concat
      -- We should pick a good "fit" here, taking the first after sorting by
      -- subsumption is something, but picking a good fit is a whole research
      -- field. We delegate that part to any installed hole fit plugins.
@@ -718,8 +642,8 @@ solveHole flags@Flags{f_fill_holes=True, ..} other_cts ptc@PTC{..}
        (fit@HoleFit{..}:_) -> do
          (term, needed) <- unsafeTcPluginTcM $ candToCore ct fit
          -- We need to pull some shenanigans for prettier printing of the warning.
-         implics <- unsafeTcPluginTcM $ (bagToList . wc_impl)
-                    <$> (tcl_lie <$> getLclEnv >>= (liftIO . readIORef))
+         implics <- unsafeTcPluginTcM $ bagToList . wc_impl
+                    <$> (getLclEnv >>= (liftIO . readIORef) . tcl_lie)
          let fvTy = fvVarSet $ tyCoFVsOfType (ctPred ct)
              tys = map ctPred relCts ++ concatMap (map idType . ic_given) implics
              anyMentioned = filter (not . isEmptyVarSet . intersectVarSet fvTy
@@ -736,7 +660,7 @@ solveHole flags@Flags{f_fill_holes=True, ..} other_cts ptc@PTC{..}
          -- Since we might be using local variables, we need to
          -- aggresively inline the holefits. We do this by maintaining
          -- our own evBindMap.
-         let cid = (ctEvEvId $ ctEvidence ct)
+         let cid = ctEvEvId $ ctEvidence ct
          unsafeTcPluginTcM $ addHFEvBind $ EvBind cid term False
          couldSolve (Just (term, ct)) (needed ++ want_rel_cts) log
        _ -> wontSolve ct
@@ -752,11 +676,7 @@ mkRefTy ct refLvl = (wrapWithVars &&& id) <$> newTyVars
         newTyVars = replicateM refLvl $ setLvl <$>
                         (newOpenTypeKind >>= TcM.newFlexiTyVar)
         setLvl = flip setMetaTyVarTcLevel hole_lvl
-#if __GLASGOW_HASKELL__ >= 810
         wrapWithVars vars = mkVisFunTys (map mkTyVarTy vars) hole_ty
-#else
-        wrapWithVars vars = mkFunTys (map mkTyVarTy vars) hole_ty
-#endif
 
 holeCtOcc :: Ct -> Maybe OccName
 holeCtOcc CHoleCan{cc_hole=hole@(ExprHole (TrueExprHole occ))} = Just occ
@@ -784,9 +704,7 @@ byCommons name fits = return $
 -- We don't want any raw hole fits, since we need the actual ids.
 isCooked :: HoleFit -> Bool
 isCooked HoleFit{..} = True
-#if __GLASGOW_HASKELL__ >= 810
 isCooked _ = False
-#endif
 
 candToCore :: Ct -> HoleFit -> TcM (EvTerm, [Ct])
 candToCore ct fit@HoleFit{..}  = do
@@ -794,15 +712,11 @@ candToCore ct fit@HoleFit{..}  = do
     -- also don't have to worry about unification, since we're explicitly using
     -- THIS fit.
     (ty, vars) <- mkRefTy ct (length hfMatches)
-#if __GLASGOW_HASKELL__ < 810
-    ((True, wrp)) <- tcCheckHoleFit emptyBag [] ty hfType
-#else
     let ty_h = TyH emptyBag [] (Just ct)
     ((True, wrp)) <- tcCheckHoleFit ty_h ty hfType
-#endif
     new_holes <- mapM (newHole ct) (zip hfMatches [0..])
     let dicts = map (evId . ctEvEvId . ctEvidence) new_holes
-    core <- flip mkApps dicts . ($ (evId hfId)) <$> (initDsTc $ dsHsWrapper wrp)
+    core <- flip mkApps dicts . ($ evId hfId) <$> initDsTc (dsHsWrapper wrp)
     let evVars = nonDetEltsUniqSet $ evVarsOfTerm (EvExpr core)
     neededEv <- mapM evToCt evVars
     return (EvExpr core, neededEv ++ new_holes)
@@ -810,7 +724,7 @@ candToCore ct fit@HoleFit{..}  = do
         evToCt var = do
           ctev_dest <-
            if isCoVar xvar
-           then HoleDest . CoercionHole xvar <$> (liftIO $ newIORef Nothing)
+           then HoleDest . CoercionHole xvar <$> liftIO (newIORef Nothing)
            else return $ EvVarDest xvar
           return $ CNonCanonical (CtWanted{..})
           where xvar = var
@@ -957,7 +871,7 @@ fixFitScope opts _ env@TcGblEnv{..} =
                   , tcg_ev_binds = removeCommonBinds hf_ev_binds tcg_ev_binds}
   where
     pL :: (a -> TcM a) -> Located a -> TcM (Located a)
-    pL act (L l a) = (L l) <$> (act a)
+    pL act (L l a) = L l <$> act a
     flags@Flags{..} = getFlags opts
     pprOut :: Outputable a => String -> a -> TcM ()
     pprOut msg p = when f_debug $
@@ -965,12 +879,12 @@ fixFitScope opts _ env@TcGblEnv{..} =
     removeCommonBinds :: EvBindMap -> Bag EvBind -> Bag EvBind
     removeCommonBinds evbs = filterBag (not . isPresentBind evbs)
 
-    -- | fixVarExprScope is where we take the actual varibale and replace
-    -- it with it's hole fit definition, thus ensuring that any local
+    -- | fixVarExprScope is where we take the actual variable and replace
+    -- it with its hole-fit definition, thus ensuring that any local
     -- arguments, types and dictionaries that the hole-fit uses is in scope.
     fixVarExprScope :: HsExpr GhcTc -> TcM (HsExpr GhcTc)
     fixVarExprScope hv@(HsVar x (L l v)) =
-        (lookupHFEvBind v) >>= \case
+        lookupHFEvBind v >>= \case
           Just eb -> do evbs <- getHFEvBinds
                         return $ HsWrap x (WpLet (EvBinds $ allRel evbs eb)) hv
           _ -> return hv
@@ -986,7 +900,7 @@ fixFitScope opts _ env@TcGblEnv{..} =
                     free = foldDVarSet add emptyDVarSet
                     add :: Var -> DVarSet -> DVarSet
                     add v cur
-                      | Just (EvBind{eb_rhs=EvExpr exp}) <- lookupEvBind evbs v
+                      | Just EvBind{eb_rhs=EvExpr exp} <- lookupEvBind evbs v
                       = exprFreeIdsDSet exp `unionDVarSet` cur
                       | otherwise = cur
 
@@ -998,7 +912,7 @@ fixFitScope opts _ env@TcGblEnv{..} =
     fixAbsBindScope fb@AbsBinds{..} = do
       -- We update to get the hfbindings replaced with their equivalent zonked
       -- w.r.t. the other bindings
-      mapM_ updateExistingHFBinds $ map (\(EvBinds bs) -> bs) abs_ev_binds
+      mapM_ (updateExistingHFBinds . (\(EvBinds bs) -> bs)) abs_ev_binds
       hf_ev_binds <- getHFEvBinds
       let -- All the TcEvBinds are EvBinds after typechecking
           absEvB = map (\(EvBinds bs) ->
@@ -1008,7 +922,7 @@ fixFitScope opts _ env@TcGblEnv{..} =
              tys <- mapM zonkTcTyVar abs_tvs
              vars <- mapM zonkEvVar abs_ev_vars
              wrp <- ($ evId abe_poly)
-                 <$> (initDsTc $ dsHsWrapper $ mkWpEvVarApps vars
+                 <$> initDsTc (dsHsWrapper $ mkWpEvVarApps vars
                                              <.> mkWpTyApps tys
                                              <.> abe_wrap) -- Always WpHole AFAICT
              return $ EvBind abe_mono (EvExpr wrp) True
@@ -1054,7 +968,7 @@ fixFitScope opts _ env@TcGblEnv{..} =
     fixBindScope x = return x
     fixMatchGroupScope m@MG{mg_alts=L l alts} =
          do res <- mapM (pL fixAltScope) alts
-            return $ m{mg_alts = (L l res)}
+            return $ m{mg_alts = L l res}
     fixAltScope m@Match{..} = do
         do res <- fixGRHSs m_grhss
            return m{m_grhss=res}
@@ -1123,7 +1037,7 @@ fixFitScope opts _ env@TcGblEnv{..} =
     fixExprScope (ExplicitList x se exprs) = do
       nexprs <- mapM (pL fixExprScope) exprs
       return $ ExplicitList x se nexprs
-    fixExprScope ru@(RecordUpd{..}) = do
+    fixExprScope ru@RecordUpd{..} = do
         ne <- pL fixExprScope rupd_expr
         upf <- mapM (pL fixUpF) rupd_flds
         return ru{rupd_expr=ne, rupd_flds=upf}
@@ -1142,15 +1056,9 @@ fixFitScope opts _ env@TcGblEnv{..} =
     fixStmtScope (ApplicativeStmt x apls se) =
       do napls <- mapM fixApl apls
          return $ ApplicativeStmt x napls se
-#if __GLASGOW_HASKELL__ >= 810
       where fixApl (se, ApplicativeArgOne x p e b f) = do
               ne <- pL fixExprScope e
               return (se, ApplicativeArgOne x p ne b f)
-#else
-      where fixApl (se, ApplicativeArgOne x p e b) = do
-              ne <- pL fixExprScope e
-              return (se, ApplicativeArgOne x p ne b)
-#endif
             fixApl (se, ApplicativeArgMany x st f b) = do
               nf <- fixExprScope f
               nst <- mapM (pL fixStmtScope) st
@@ -1178,7 +1086,7 @@ fixFitScope opts _ env@TcGblEnv{..} =
       nu <- pL fixExprScope trS_using
       nfm <- fixExprScope trS_fmap
       nby <- case trS_by of
-                Just e -> Just <$> (pL fixExprScope e)
+                Just e -> Just <$> pL fixExprScope e
                 Nothing -> return Nothing
       return t{trS_stmts=nst, trS_using=nu, trS_by=nby, trS_fmap=nfm}
     fixStmtScope x = return x
